@@ -23,6 +23,22 @@ static int str_eq(const struct lldp_str *a, const struct lldp_str *b)
 	       memcmp(a->s, b->s, a->len) == 0;
 }
 
+static int mgmt_eq(const struct neigh *n, const struct lldp_msg *m)
+{
+	unsigned i;
+
+	if (n->n_mgmt != m->n_mgmt)
+		return 0;
+	for (i = 0; i < m->n_mgmt; i++) {
+		const struct lldp_mgmt *a = &n->mgmt[i], *b = &m->mgmt[i];
+		if (a->subtype != b->subtype || a->len != b->len ||
+		    a->if_subtype != b->if_subtype || a->if_number != b->if_number ||
+		    memcmp(a->addr, b->addr, a->len) != 0)
+			return 0;
+	}
+	return 1;
+}
+
 static struct neigh *find(struct neigh_table *t, const struct lldp_msg *m)
 {
 	unsigned i;
@@ -68,13 +84,17 @@ enum neigh_result neigh_update(struct neigh_table *t, const struct lldp_msg *m,
 			   str_eq(&n->port_desc, &m->port_desc) &&
 			   str_eq(&n->sys_name, &m->sys_name) &&
 			   str_eq(&n->sys_desc, &m->sys_desc) &&
+			   n->has_sys_cap == m->has_sys_cap &&
+			   n->sys_cap == m->sys_cap &&
+			   n->sys_cap_enabled == m->sys_cap_enabled &&
+			   mgmt_eq(n, m) &&
 			   memcmp(n->src_mac, src_mac, ETH_ADDR_LEN) == 0;
 		res = same ? NEIGH_REFRESHED : NEIGH_UPDATED;
 	} else {
 		for (i = 0; i < NEIGH_MAX && t->e[i].in_use; i++)
 			;
 		if (i == NEIGH_MAX)
-			return NEIGH_FULL;   /* 9.2.7: tooManyNeighbors */
+			return NEIGH_FULL;   /* 9.2.5 variable tooManyNeighbors */
 		n = &t->e[i];
 		memset(n, 0, sizeof *n);
 		n->in_use = 1;
@@ -93,6 +113,13 @@ enum neigh_result neigh_update(struct neigh_table *t, const struct lldp_msg *m,
 	n->port_desc = m->port_desc;
 	n->sys_name = m->sys_name;
 	n->sys_desc = m->sys_desc;
+	n->has_sys_cap = m->has_sys_cap;
+	n->sys_cap = m->sys_cap;
+	n->sys_cap_enabled = m->sys_cap_enabled;
+	n->n_mgmt = m->n_mgmt;
+	memcpy(n->mgmt, m->mgmt, sizeof n->mgmt);
+	n->n_org_tlvs = m->n_org_tlvs;
+	n->n_unknown_tlvs = m->n_unknown_tlvs;
 	n->rx_count++;
 	if (out)
 		*out = n;
@@ -105,7 +132,7 @@ unsigned neigh_age(struct neigh_table *t, uint64_t now_ms, neigh_cb cb, void *ct
 
 	for (i = 0; i < NEIGH_MAX; i++) {
 		struct neigh *n = &t->e[i];
-		/* 9.2.9: rxInfoAge when the TTL timer reaches zero */
+		/* 9.2.9 rx state machine: rxInfoAge when rxTTL reaches zero, 9.2.7 mibDeleteObjects() */
 		if (n->in_use && now_ms >= n->expires_ms) {
 			if (cb)
 				cb(n, ctx);
@@ -115,6 +142,21 @@ unsigned neigh_age(struct neigh_table *t, uint64_t now_ms, neigh_cb cb, void *ct
 		}
 	}
 	return aged;
+}
+
+unsigned neigh_flush(struct neigh_table *t, neigh_cb cb, void *ctx)
+{
+	unsigned i, n = 0;
+
+	for (i = 0; i < NEIGH_MAX; i++)
+		if (t->e[i].in_use) {
+			if (cb)
+				cb(&t->e[i], ctx);
+			memset(&t->e[i], 0, sizeof t->e[i]);
+			n++;
+		}
+	t->count = 0;
+	return n;
 }
 
 int neigh_next_expiry(const struct neigh_table *t, uint64_t *when_ms)
@@ -140,12 +182,14 @@ static void print_str(FILE *f, const char *label, const struct lldp_str *s)
 	fprintf(f, "    %-12s %s\n", label, esc);
 }
 
-void neigh_print(const struct neigh_table *t, uint64_t now_ms, FILE *f)
+void neigh_print(const struct neigh_table *t, const char *label, uint64_t now_ms, FILE *f)
 {
 	char cid[LLDP_IDFMT_MAX], pid[LLDP_IDFMT_MAX], mac[18];
-	unsigned i, k = 0;
+	char caps[LLDP_CAPFMT_MAX], en[LLDP_CAPFMT_MAX], ma[LLDP_MGMTFMT_MAX];
+	unsigned i, j, k = 0;
 
-	fprintf(f, "---- neighbour table: %u entr%s ----\n",
+	fprintf(f, "---- %s%sneighbour table: %u entr%s ----\n",
+		label ? label : "", label ? " " : "",
 		t->count, t->count == 1 ? "y" : "ies");
 	for (i = 0; i < NEIGH_MAX; i++) {
 		const struct neigh *n = &t->e[i];
@@ -162,6 +206,21 @@ void neigh_print(const struct neigh_table *t, uint64_t now_ms, FILE *f)
 		print_str(f, "sys name", &n->sys_name);
 		print_str(f, "sys desc", &n->sys_desc);
 		print_str(f, "port desc", &n->port_desc);
+		if (n->has_sys_cap) {
+			lldp_caps_format(n->sys_cap, caps, sizeof caps);
+			lldp_caps_format(n->sys_cap_enabled, en, sizeof en);
+			fprintf(f, "    %-12s %s (enabled: %s)\n", "capabilities", caps, en);
+		}
+		for (j = 0; j < n->n_mgmt; j++) {
+			lldp_mgmt_format(&n->mgmt[j], ma, sizeof ma);
+			fprintf(f, "    %-12s %s (if %s %u)\n", "mgmt addr", ma,
+				n->mgmt[j].if_subtype == LLDP_IFNUM_IFINDEX ? "ifindex" :
+				n->mgmt[j].if_subtype == LLDP_IFNUM_SYSPORT ? "port" : "?",
+				n->mgmt[j].if_number);
+		}
+		if (n->n_org_tlvs || n->n_unknown_tlvs)
+			fprintf(f, "    %-12s %u org-specific, %u unrecognised\n", "other TLVs",
+				n->n_org_tlvs, n->n_unknown_tlvs);
 	}
 	fprintf(f, "----\n");
 	fflush(f);

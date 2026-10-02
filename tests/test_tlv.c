@@ -79,6 +79,45 @@ static void test_builders(void)
 	CHECK_MEM(mem, expect, sizeof expect);
 }
 
+static void test_sys_cap_and_mgmt_builders(void)
+{
+	uint8_t mem[64];
+	struct lldp_buf b;
+	const uint8_t v4[4] = { 192, 0, 2, 1 };
+	static const uint8_t expect[] = {
+		/* System Capabilities: type 7, len 4 -> 0x0e04; station / station */
+		0x0e, 0x04, 0x00, 0x80, 0x00, 0x80,
+		/* Management Address: type 8, len 12 -> 0x100c
+		 * asl 5 | IPv4 (1) | 192.0.2.1 | ifIndex (2) | 2 | OID len 0 */
+		0x10, 0x0c, 0x05, 0x01, 0xc0, 0x00, 0x02, 0x01,
+		0x02, 0x00, 0x00, 0x00, 0x02, 0x00,
+	};
+	uint8_t big[32];
+
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_sys_cap(&b, LLDP_CAP_STATION, LLDP_CAP_STATION) == 0);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, LLDP_AF_IPV4, v4, 4, LLDP_IFNUM_IFINDEX, 2) == 0);
+	CHECK(b.err == 0 && b.len == sizeof expect);
+	CHECK_MEM(mem, expect, sizeof expect);
+
+	/* interface number is big-endian, all 32 bits */
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, LLDP_AF_IPV4, v4, 4, 3, 0x01020304u) == 0);
+	CHECK(mem[9] == 0x01 && mem[10] == 0x02 && mem[11] == 0x03 && mem[12] == 0x04);
+
+	/* address length 1..31 (8.5.9.4) */
+	memset(big, 0xab, sizeof big);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, 99, big, 31, 1, 0) == 0);
+	CHECK(b.len == 2 + 1 + 1 + 31 + 1 + 4 + 1);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, 99, big, 32, 1, 0) == -1);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, 99, big, 0, 1, 0) == -1);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_mgmt_addr(&b, 99, NULL, 4, 1, 0) == -1);
+}
+
 static void test_builder_limits(void)
 {
 	uint8_t mem[600];
@@ -192,6 +231,7 @@ int main(void)
 	RUN(test_hdr_roundtrip_exhaustive);
 	RUN(test_hdr_overflow);
 	RUN(test_builders);
+	RUN(test_sys_cap_and_mgmt_builders);
 	RUN(test_builder_limits);
 	RUN(test_iter_roundtrip);
 	RUN(test_iter_malformed);

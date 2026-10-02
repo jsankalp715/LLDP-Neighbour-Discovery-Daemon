@@ -13,7 +13,7 @@
 /*
  * Fixed-size table: no allocation on the receive path, and a hard cap on
  * the memory an attacker can make us commit. When full, new neighbours are
- * dropped (9.2.7, tooManyNeighbors) while existing ones keep refreshing.
+ * dropped (tooManyNeighbors, a 9.2.5 variable) while existing ones keep refreshing.
  */
 #define NEIGH_MAX 32
 
@@ -30,6 +30,13 @@ struct neigh {
 	struct lldp_str port_desc;
 	struct lldp_str sys_name;
 	struct lldp_str sys_desc;
+	int             has_sys_cap;
+	uint16_t        sys_cap;
+	uint16_t        sys_cap_enabled;
+	unsigned        n_mgmt;
+	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
+	unsigned        n_org_tlvs;
+	unsigned        n_unknown_tlvs;
 	uint32_t        rx_count;
 };
 
@@ -63,10 +70,18 @@ typedef void (*neigh_cb)(const struct neigh *n, void *ctx);
 /* Remove every entry whose TTL has expired by now_ms; returns how many. */
 unsigned neigh_age(struct neigh_table *t, uint64_t now_ms, neigh_cb cb, void *ctx);
 
+/*
+ * Remove every entry (the port stopped being operational: 9.2.9, the rx
+ * state machine re-initialises and 9.2.7 rxInitializeLLDP() deletes all
+ * remote information for the port). Returns how many.
+ */
+unsigned neigh_flush(struct neigh_table *t, neigh_cb cb, void *ctx);
+
 /* Earliest expiry time; returns 0 if the table is empty, else 1. */
 int neigh_next_expiry(const struct neigh_table *t, uint64_t *when_ms);
 
-void neigh_print(const struct neigh_table *t, uint64_t now_ms, FILE *f);
+/* label (optional) is printed in the header, e.g. the port name */
+void neigh_print(const struct neigh_table *t, const char *label, uint64_t now_ms, FILE *f);
 
 const char *neigh_result_str(enum neigh_result r);
 

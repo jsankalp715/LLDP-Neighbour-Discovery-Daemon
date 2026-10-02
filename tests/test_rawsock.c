@@ -109,7 +109,8 @@ int main(int argc, char **argv)
 	CHECK(mcast_joined(argv[2]));
 
 	/* 1. LLDP frame A -> B arrives byte-identical and parses */
-	memcpy(li.mac, a.mac, 6);
+	memcpy(li.chassis_mac, a.mac, 6);
+	memcpy(li.port_mac, a.mac, 6);
 	li.ifname = argv[1];
 	flen = lldp_frame_build(&li, tx, sizeof tx);
 	CHECK(flen == 14 + 9 + 2 + 1 + (ssize_t)strlen(argv[1]) + 4 + 8 + 6 + 14 + 2);
@@ -156,7 +157,8 @@ int main(int argc, char **argv)
 	}
 
 	/* 5. B -> A direction also works */
-	memcpy(li.mac, b.mac, 6);
+	memcpy(li.chassis_mac, b.mac, 6);
+	memcpy(li.port_mac, b.mac, 6);
 	li.ifname = argv[2];
 	flen = lldp_frame_build(&li, tx, sizeof tx);
 	CHECK(lldp_sock_send(&b, tx, (size_t)flen) == 0);

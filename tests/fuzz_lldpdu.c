@@ -9,8 +9,11 @@
  *                  structure-aware random TLV chains (make fuzz).
  *
  * Every input is copied into an exactly-sized heap buffer so that ASan flags
- * a one-byte over-read. Accepted LLDPDUs are re-encoded and re-parsed, and
- * the result must be identical (abort() otherwise).
+ * a one-byte over-read. Invariants checked on every accepted LLDPDU (abort()
+ * on violation):
+ *   - it re-encodes, and re-parses to identical contents;
+ *   - the stored neighbour renders to syntactically valid, pure-ASCII JSON.
+ * Each input is also fed to the rtnetlink parser.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +22,9 @@
 
 #include "../src/lldpdu.h"
 #include "../src/neigh.h"
+#include "../src/netmon.h"
+#include "../src/report.h"
+#include "json_check.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -51,6 +57,20 @@ static int id_same(const struct lldp_id *a, const struct lldp_id *b)
 	       memcmp(a->id, b->id, a->len) == 0;
 }
 
+static int mgmt_same(const struct lldp_msg *a, const struct lldp_msg *b)
+{
+	if (a->n_mgmt != b->n_mgmt)
+		return 0;
+	for (unsigned i = 0; i < a->n_mgmt; i++) {
+		const struct lldp_mgmt *x = &a->mgmt[i], *y = &b->mgmt[i];
+		if (x->subtype != y->subtype || x->len != y->len ||
+		    x->if_subtype != y->if_subtype || x->if_number != y->if_number ||
+		    memcmp(x->addr, y->addr, x->len) != 0)
+			return 0;
+	}
+	return 1;
+}
+
 /* Invariant: what we accepted, we can re-encode, and it decodes the same. */
 static void roundtrip(const struct lldp_msg *m)
 {
@@ -65,6 +85,12 @@ static void roundtrip(const struct lldp_msg *m)
 	str_put(&b, LLDP_TLV_PORT_DESC, &m->port_desc);
 	str_put(&b, LLDP_TLV_SYS_NAME, &m->sys_name);
 	str_put(&b, LLDP_TLV_SYS_DESC, &m->sys_desc);
+	if (m->has_sys_cap)
+		lldp_tlv_put_sys_cap(&b, m->sys_cap, m->sys_cap_enabled);
+	for (unsigned i = 0; i < m->n_mgmt; i++)
+		lldp_tlv_put_mgmt_addr(&b, m->mgmt[i].subtype, m->mgmt[i].addr,
+				       m->mgmt[i].len, m->mgmt[i].if_subtype,
+				       m->mgmt[i].if_number);
 	lldp_tlv_put_end(&b);
 	if (b.err) {
 		fprintf(stderr, "roundtrip: accepted message cannot be re-encoded\n");
@@ -75,10 +101,41 @@ static void roundtrip(const struct lldp_msg *m)
 	    !id_same(&m->port, &fz_msg2.port) || m->ttl != fz_msg2.ttl ||
 	    !str_same(&m->port_desc, &fz_msg2.port_desc) ||
 	    !str_same(&m->sys_name, &fz_msg2.sys_name) ||
-	    !str_same(&m->sys_desc, &fz_msg2.sys_desc)) {
+	    !str_same(&m->sys_desc, &fz_msg2.sys_desc) ||
+	    m->has_sys_cap != fz_msg2.has_sys_cap ||
+	    (m->has_sys_cap && (m->sys_cap != fz_msg2.sys_cap ||
+				m->sys_cap_enabled != fz_msg2.sys_cap_enabled)) ||
+	    !mgmt_same(m, &fz_msg2)) {
 		fprintf(stderr, "roundtrip: mismatch (rc=%d)\n", rc);
 		abort();
 	}
+}
+
+static void nm_sink(const struct nm_event *ev, void *ctx)
+{
+	(void)ctx;
+	/* every delivered string must be terminated within its buffer */
+	if (memchr(ev->ifname, 0, sizeof ev->ifname) == NULL ||
+	    memchr(ev->alias, 0, sizeof ev->alias) == NULL)
+		abort();
+}
+
+/* Invariant: an accepted neighbour always renders to valid, ASCII JSON. */
+static void check_json(const struct neigh *n)
+{
+	char *buf = NULL;
+	size_t len = 0;
+	FILE *f = open_memstream(&buf, &len);
+
+	if (!f)
+		return;
+	report_neigh_json(n, fz_clock, f);
+	fclose(f);
+	if (!json_valid(buf, len)) {
+		fprintf(stderr, "invalid JSON for accepted neighbour: %s\n", buf);
+		abort();
+	}
+	free(buf);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -96,6 +153,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	/* the raw input as a bare LLDPDU */
 	(void)lldpdu_parse(data, size, &fz_msg);
 
+	/* ... and as an rtnetlink message buffer (needs 4-byte alignment) */
+	{
+		static unsigned char nl[LLDP_FRAME_MAX + 256] __attribute__((aligned(4)));
+		size_t nlen = size < sizeof nl ? size : sizeof nl;
+		memcpy(nl, data, nlen);
+		(void)netmon_parse(nl, nlen, nm_sink, NULL);
+	}
+
 	/* the raw input as an Ethernet frame, like the daemon sees it */
 	if (eth_frame_parse(data, size, &v) < 0) {
 		last_rc = -1;
@@ -111,11 +176,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	lldp_id_format(&fz_msg.port, 0, out, sizeof out);
 
 	fz_clock += 250;
-	(void)neigh_update(&fz_table, &fz_msg, v.src, fz_clock, &n);
+	if (neigh_update(&fz_table, &fz_msg, v.src, fz_clock, &n) != NEIGH_FULL && n)
+		check_json(n);
 	if ((fz_clock / 250) % 64 == 0) {
 		neigh_age(&fz_table, fz_clock, NULL, NULL);
 		if (fz_null)
-			neigh_print(&fz_table, fz_clock, fz_null);
+			neigh_print(&fz_table, "fuzz", fz_clock, fz_null);
 	}
 	return 0;
 }
@@ -151,7 +217,8 @@ static void make_seeds(void)
 	uint8_t f[LLDP_FRAME_MAX], pdu[1500];
 	char longs[256];
 	struct lldp_local_info li = {
-		.mac = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 }, .ifname = "eth0",
+		.chassis_mac = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 },
+		.port_mac = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x56 }, .ifname = "eth0",
 		.ttl = 121, .port_desc = "uplink", .sys_name = "fuzz",
 		.sys_desc = "Linux fuzz",
 	};
@@ -186,7 +253,7 @@ static void make_seeds(void)
 	lldp_tlv_put(&b, 42, "unknown", 7);
 	lldp_tlv_put_sys_name(&b, "all-tlvs");
 	lldp_tlv_put_end(&b);
-	n = eth_frame_build(f, sizeof f, LLDP_MCAST_NEAREST_BRIDGE, li.mac,
+	n = eth_frame_build(f, sizeof f, LLDP_MCAST_NEAREST_BRIDGE, li.port_mac,
 			    ETHERTYPE_LLDP, pdu, b.len);
 	add_seed(f, (size_t)n);
 }

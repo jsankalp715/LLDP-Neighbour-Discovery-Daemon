@@ -131,6 +131,46 @@ int lldp_tlv_put_sys_desc(struct lldp_buf *b, const char *s)
 	return put_string(b, LLDP_TLV_SYS_DESC, s);
 }
 
+/* 8.5.8 System Capabilities: 2-octet supported bitmap, 2-octet enabled bitmap */
+int lldp_tlv_put_sys_cap(struct lldp_buf *b, uint16_t supported, uint16_t enabled)
+{
+	uint8_t v[4] = {
+		(uint8_t)(supported >> 8), (uint8_t)supported,
+		(uint8_t)(enabled >> 8),   (uint8_t)enabled,
+	};
+	return lldp_tlv_put(b, LLDP_TLV_SYS_CAP, v, sizeof v);
+}
+
+/*
+ * 8.5.9 Management Address, Figure 8-11:
+ *   addr string length (1) = 1 + addr_len | addr subtype (1) | addr (1..31)
+ *   | if numbering subtype (1) | if number (4) | OID length (1) = 0
+ * No object identifier is advertised.
+ */
+int lldp_tlv_put_mgmt_addr(struct lldp_buf *b, uint8_t addr_subtype,
+			   const void *addr, size_t addr_len,
+			   uint8_t if_subtype, uint32_t if_number)
+{
+	uint8_t v[1 + 1 + LLDP_MGMT_ADDR_MAX + 1 + 4 + 1];
+	size_t n = 0;
+
+	if (addr == NULL || addr_len < 1 || addr_len > LLDP_MGMT_ADDR_MAX) {
+		b->err = 1;
+		return -1;
+	}
+	v[n++] = (uint8_t)(1 + addr_len);
+	v[n++] = addr_subtype;
+	memcpy(v + n, addr, addr_len);
+	n += addr_len;
+	v[n++] = if_subtype;
+	v[n++] = (uint8_t)(if_number >> 24);
+	v[n++] = (uint8_t)(if_number >> 16);
+	v[n++] = (uint8_t)(if_number >> 8);
+	v[n++] = (uint8_t)if_number;
+	v[n++] = 0;                             /* OID string length */
+	return lldp_tlv_put(b, LLDP_TLV_MGMT_ADDR, v, n);
+}
+
 /* 8.5.1 End Of LLDPDU: type 0, length 0 */
 int lldp_tlv_put_end(struct lldp_buf *b)
 {
