@@ -1,277 +1,365 @@
 # lldpnd: an LLDP (IEEE 802.1AB) neighbour discovery daemon in C
 
-`lldpnd` implements the Link Layer Discovery Protocol from the standard over raw
-`AF_PACKET` sockets. It builds and parses the Ethernet II frames and TLVs by hand,
-with no libpcap, lldpd or LLDP library. It keeps a neighbour table with TTL-based
-ageing, transmits periodically, and treats every received byte as untrusted.
+`lldpnd` implements the Link Layer Discovery Protocol from the standard, over raw
+`AF_PACKET` sockets. Ethernet II frames and TLVs are built and parsed by hand: no
+libpcap, no lldpd, no LLDP library. Everything received is treated as untrusted.
 
-* C11, Linux only, `-Wall -Wextra -Werror` (plus `-Wshadow -Wstrict-prototypes
-  -Wmissing-prototypes -Wvla -Wformat=2 -Wpointer-arith`)
-* single-threaded `epoll` loop: a socket, three `timerfd`s and a `signalfd`, with no busy-waiting
-* clean under AddressSanitizer + UBSan and valgrind memcheck. The parser was fuzzed
-  with 12 M driver iterations and 15 M libFuzzer executions.
-* tested end to end on a 3-namespace Linux bridge testbed, with captures decoded by
-  Wireshark's dissector (`tshark`)
+* **Protocol.** It advertises Chassis ID, Port ID, TTL, Port Description, System
+  Name, System Description, System Capabilities and Management Address. It runs on
+  several interfaces at once with one chassis ID. Local changes (alias, addresses,
+  link state, hostname) are sent immediately, limited by the transmit credit. It also
+  implements fast start, a shutdown LLDPDU on exit, link up/down handling with
+  `reinitDelay`, interface hot-plug, and loop detection.
+* **Implementation.** C11, Linux only, `-Wall -Wextra -Werror` with GCC and Clang.
+  One thread and one `epoll` loop: sockets, `timerfd`s, `signalfd`, rtnetlink and a
+  hostname watch. An idle daemon wakes only to transmit.
+* **Operation.** `lldpnd-ctl` queries the daemon as text or JSON. `-U user` drops
+  to an unprivileged user that keeps only `CAP_NET_RAW`. The project includes a
+  hardened systemd unit (`systemd-analyze security` exposure 1.9) and man pages.
+* **Verification.** Unit tests run plain, under valgrind and under ASan+UBSan. The
+  receive path is fuzzed. A namespace testbed checks captures with Wireshark's
+  dissector, and an interoperability test runs against **lldpd**. CI runs all of it.
 
-```
-src/
-  tlv.[ch]      TLV header encode/decode (7-bit type, 9-bit length), builders, iterator
-  frame.[ch]    Ethernet II build/parse, SIOCGIFHWADDR, 01:80:C2:00:00:0E, 0x88CC
-  lldpdu.[ch]   LLDPDU builder + validating parser, safe formatting of untrusted strings
-  neigh.[ch]    neighbour table keyed by (Chassis ID, Port ID), TTL expiry, refresh
-  rawsock.[ch]  AF_PACKET socket: bind to ifindex + 0x88CC, PACKET_ADD_MEMBERSHIP
-  main.c        CLI, epoll/timerfd/signalfd event loop, statistics
-tests/
-  test_tlv.c test_frame.c test_lldpdu.c test_neigh.c   unit tests (350 checks)
-  test_rawsock.c                                       raw socket integration test (root)
-  fuzz_lldpdu.c                                        fuzz driver / libFuzzer target
-scripts/
-  testbed.sh       3-namespace bridge testbed (root)
-  inject_lldp.py   crafts malformed/edge-case LLDP frames for the testbed
-  idle_check.sh    proves the daemon sleeps in epoll_wait when idle
-```
-
-## Build and run
+## Quick start
 
 ```bash
-make                  # daemon + tests into build/
-make test             # unit tests
-make check            # unit tests + valgrind + ASan/UBSan + fuzz driver
-sudo make rawsock-test
-sudo make testbed
-sudo make libfuzzer FUZZ_SECS=120   # needs clang
+make                                   # build/lldpnd, build/lldpnd-ctl, tests
+sudo ./build/lldpnd -i eth0            # or -i eno1,eno2 for several ports
+sudo ./build/lldpnd-ctl show           # neighbour tables (also: json, stats, local)
 ```
 
-```
-usage: lldpnd -i <interface> [options]
-  -i IF     interface to run LLDP on (required)
-  -t SECS   transmit interval, msgTxInterval (1-3600, default 30)
-  -H N      hold multiplier, msgTxHold (1-100, default 4);
-            advertised TTL = min(65535, SECS * N + 1)
-  -p SECS   print neighbour table every SECS (default: on change only)
-  -n NAME   System Name TLV (default: hostname)
-  -d DESC   System Description TLV (default: uname)
-  -P DESC   Port Description TLV (default: "LLDP port <IF>")
+As a service:
+
+```bash
+sudo make install                      # /usr/local/{sbin,bin,share/man}, systemd unit
+echo 'LLDPND_OPTS="-i eth0"' | sudo tee /etc/default/lldpnd
+sudo systemctl enable --now lldpnd
+sudo lldpnd-ctl -S /run/lldpnd/lldpnd.sock json | jq '.ports[].neighbors[].system_name'
 ```
 
-It needs `CAP_NET_RAW` (root). SIGINT or SIGTERM sends a shutdown LLDPDU, prints the
-table and statistics, and exits 0. A real log excerpt from the testbed:
+### `lldpnd` options
+
+| Option | Meaning | Default |
+|---|---|---|
+| `-i IF[,IF…]` | interfaces to run on (repeatable, up to 32) | required |
+| `-c IF` | interface whose MAC is the chassis ID | first `-i` |
+| `-t SECS` | msgTxInterval, 1–3600 | 30 |
+| `-H N` | msgTxHold, 1–100; TTL = min(65535, SECS×N+1) | 4 (TTL 121) |
+| `-f N` | txFastInit: frames sent 1 s apart at start, on link up and for a new neighbour, 0–8 | 4 |
+| `-C N` | txCreditMax: back-to-back frames allowed, 1–10 | 5 |
+| `-p SECS` | print the tables periodically | print on change |
+| `-n` / `-d` | System Name / Description | hostname (followed live) / uname |
+| `-P DESC` | Port Description for every port | interface alias, else name |
+| `-M` | don't send Management Address TLVs | send them |
+| `-S PATH` | control socket, or `none` | `/run/lldpnd.sock` |
+| `-U USER` | run as USER after start-up, keeping only CAP_NET_RAW | stay root |
+
+The daemon logs one line per event to stdout:
 
 ```
-22:48:22.260 [eth0] lldpnd started: ifindex=2 chassis=02:00:00:00:00:01 port=eth0 tx-interval=2s ttl=7s
 22:48:28.261 [eth0] NEIGHBOUR ADD chassis=02:00:00:00:00:02 port=eth0(st5) name=ns2 ttl=7
 22:48:31.386 [eth0] rx: discard from 02:00:00:00:00:99: truncated TLV / length exceeds frame
-22:48:31.436 [eth0] rx: discard from 02:00:00:00:00:99: third TLV is not TTL
 22:48:37.262 [eth0] NEIGHBOUR AGEOUT chassis=02:00:00:00:00:03 port=eth0(st5) name=ns3 ttl=7 (TTL expired, last rx 7000 ms ago)
-22:48:37.328 [eth0] NEIGHBOUR DELETE chassis=02:00:00:00:00:02 port=eth0(st5) name=ns2 ttl=7 (shutdown LLDPDU)
-22:48:38.364 [eth0] stats: out=10 in=20 discarded=10 in_errors=10 tlvs_unrecognized=1 ageouts=1 too_many_neighbors=0
+22:48:37.328 [eth1] NEIGHBOUR DELETE chassis=02:00:00:00:00:02 port=eth0(st5) name=ns2 ttl=7 (shutdown LLDPDU)
 ```
+
+SIGINT or SIGTERM sends a shutdown LLDPDU (TTL 0) on every port, prints the tables
+and statistics, and exits 0. See `man/lldpnd.8` and `man/lldpnd-ctl.8`.
 
 ## Design
 
-### Layers
+```
+src/
+  tlv.[ch]        TLV header (7-bit type, 9-bit length), builders, bounds-checked iterator   8.4-8.6
+  frame.[ch]      Ethernet II build/parse, SIOCGIFHWADDR, 01:80:C2:00:00:0E, 0x88CC        7
+  lldpdu.[ch]     LLDPDU builder; validating parser; escaping/formatting of untrusted data  8.2, 8.5
+  neigh.[ch]      remote systems table keyed by (Chassis ID, Port ID); TTL expiry; flush   9.2.7, 9.2.9
+  txsched.[ch]    txTTR / txFast / txCredit / txNow on an injected clock (pure logic)      9.2.5, 9.2.8, 9.2.10
+  rawsock.[ch]    AF_PACKET socket bound to ifindex + 0x88CC, PACKET_ADD_MEMBERSHIP
+  netmon.[ch]     rtnetlink link/address events, link dump
+  localinfo.[ch]  hostname, uname, capabilities, management-address selection
+  agent.[ch]      ports, local-change detection, rx/tx/ageing, the epoll loop               9
+  ctl.[ch]        non-blocking control socket;  report.[ch]  text + JSON views
+  privdrop.[ch]   setuid + capset(CAP_NET_RAW) + no_new_privs
+  main.c          CLI                       lldpnd_ctl.c   the lldpnd-ctl client
+```
 
-Each layer was built and tested before the next one was started.
+### Event loop
 
-1. **TLV (`tlv.c`, clause 8.4).** The header is `(type << 9) | length`, big-endian.
-   The builders write into a bounded `lldp_buf` whose error flag latches, so a
-   builder can issue a sequence of puts and check once. Each builder enforces its
-   TLV's legal length: IDs 1..255 octets, strings 0..255, TTL exactly 2. The iterator
-   (`lldp_tlv_next`) is the only code that walks received TLVs. It rejects a
-   truncated header and any length that runs past the buffer, so nothing downstream
-   ever sees an out-of-bounds value pointer.
-2. **Ethernet (`frame.c`, clause 7).** Each frame is dst `01:80:C2:00:00:0E`, src (from
-   `SIOCGIFHWADDR`, which must be `ARPHRD_ETHER`), EtherType `0x88CC`, then the LLDPDU.
-   Frames are zero-padded to the 60-octet minimum (the NIC appends the FCS).
-3. **Raw socket (`rawsock.c`).** The socket is `socket(AF_PACKET, SOCK_RAW, 0)`, followed
-   by `bind()` with `sll_protocol = htons(0x88CC)` and the interface index. Creating it
-   with protocol 0 means it receives nothing until it is bound to one interface *and* the
-   LLDP EtherType. Creating it with `ETH_P_LLDP` directly would briefly receive LLDP from
-   every interface. `PACKET_ADD_MEMBERSHIP` (`PACKET_MR_MULTICAST`) programs the group
-   address into the device filter, which the integration test verifies via
-   `/proc/net/dev_mcast`. `recvfrom(MSG_TRUNC)` detects oversized frames, and
-   `sll_pkttype == PACKET_OUTGOING` identifies our own transmissions.
-4. **Parser + neighbour table (`lldpdu.c`, `neigh.c`).** These are covered in the next two sections.
-5. **Event loop (`main.c`).**
-   * tx `timerfd`: fires once immediately, then every `msgTxInterval`.
-   * age `timerfd`: one-shot, absolute `CLOCK_MONOTONIC`, re-armed after every change
-     to the *earliest* neighbour expiry. It wakes exactly when an entry expires rather
-     than polling every second.
-   * print `timerfd`: optional (`-p`). Without it, the table is printed whenever it changes.
-   * `signalfd`: SIGINT and SIGTERM are blocked and read as events, so no code runs in
-     signal context.
-   * socket: drained up to 64 frames per wakeup.
+All work arrives on file descriptors in one `epoll` set:
 
-   `scripts/idle_check.sh` measured **4 wakeups in 20 s with `-t 5` (one per transmit),
-   0 ms of CPU, and the process parked in `do_epoll_wait`**.
+| fd | fires when | action |
+|---|---|---|
+| raw socket (per port) | an LLDP frame arrives | validate, update table, maybe fast-transmit |
+| tx `timerfd` (per port) | one-shot at `txs_deadline()` | re-check local info, transmit if allowed |
+| age `timerfd` (per port) | one-shot at the earliest neighbour expiry | remove expired neighbours |
+| rtnetlink | link/address change | portEnabled, re-attach, rebuild LLDPDUs |
+| `/proc/sys/kernel/hostname` | hostname changed (`POLLPRI`) | rebuild LLDPDUs |
+| `signalfd` | SIGINT / SIGTERM | shutdown LLDPDUs, exit |
+| control socket + clients | a query | render and send a reply |
 
-### Receive validation (clauses 8.2, 8.5, and 9.2.7 rxProcessFrame)
-
-All received data is untrusted. An LLDPDU is discarded, and counted in
-`statsFramesDiscardedTotal` / `statsFramesInErrorsTotal`, if any of these hold:
-
-| Rule | Error |
-|---|---|
-| a TLV header or length runs past the end of the frame | `truncated TLV / length exceeds frame` |
-| TLV 1, 2 and 3 are not Chassis ID, Port ID and TTL, in that order (this also covers a missing mandatory TLV) | `first/second/third TLV is not …` |
-| no End Of LLDPDU before the data runs out | `missing End Of LLDPDU TLV` |
-| End Of LLDPDU has a nonzero length | `End Of LLDPDU TLV with nonzero length` |
-| Chassis/Port ID length is not 2..256, its subtype is reserved (0 or 8..255), a MAC subtype carries other than 6 octets, or a network-address subtype carries fewer than 2 | `invalid Chassis ID / Port ID TLV` |
-| TTL length ≠ 2 | `invalid TTL TLV length` |
-| Chassis ID, Port ID or TTL appears again later | `mandatory TLV repeated` |
-| Port Desc / Sys Name / Sys Desc / Sys Cap appears twice | `single-instance optional TLV repeated` |
-| a string TLV is over 255, Sys Cap ≠ 4, an org-specific TLV is under 4, or a Management Address has internal lengths that don't add up (8.5.9) | `optional TLV has invalid length` |
-
-Two cases are accepted rather than rejected:
-
-* Reserved TLV types 9..126 and well-formed org-specific (127) TLVs are skipped and
-  counted (`statsTLVsUnrecognizedTotal`).
-* Anything after End Of LLDPDU is treated as padding and ignored.
-
-The parser copies values into fixed-size fields of `struct lldp_msg`, so it needs no
-allocation. Every string printed from the network is escaped (`\xNN` for anything
-non-printable, including `\`). This prevents terminal-escape injection, and a test
-covers it.
-
-### Neighbour table (9.2.7, 9.2.9)
-
-* **Key and capacity.** Entries are keyed by Chassis ID and Port ID, comparing subtype,
-  length and bytes. The table has a fixed 32 entries: memory is bounded and there is no
-  allocation on the receive path. When it is full, new neighbours are dropped
-  (`tooManyNeighbors`) while existing ones keep refreshing.
-* **On reception.** A received LLDPDU makes an entry `ADD`ed (new), `UPDATE`d (content
-  or TTL changed) or `REFRESH`ed (identical). Either way its expiry restarts at
-  `now + TTL`.
-* **Shutdown and expiry.** TTL 0 is a shutdown LLDPDU and deletes the entry
-  immediately. An expired entry is removed with an `AGEOUT` log line that includes the
-  monotonic time since its last LLDPDU.
+The standard drives `txTTR` and `txCredit` from a one-second `txTick`. `txsched`
+instead computes the credit lazily from elapsed time and arms one timer for the next
+real deadline, so an idle daemon doesn't wake every second. After start-up settles,
+`scripts/idle_check.sh` measured 4 wake-ups in 20 s with `-t 5` (one per frame),
+0 ms of CPU, waiting in `do_epoll_wait`.
 
 ### Transmit
 
-The transmitted TLVs are Chassis ID (subtype 4, MAC), Port ID (subtype 5, ifName), TTL,
-Port Description, System Name, System Description and End. The advertised TTL is
-`min(65535, msgTxInterval × msgTxHold + 1)`, which is 121 s with the defaults. On exit
-the daemon sends a shutdown LLDPDU (9.2.7 mkShutdownLLDPDU), containing only the
-mandatory TLVs with TTL 0.
+* **Information LLDPDU** (9.2.7 `mibConstrInfoLLDPDU()`):
+  * Chassis ID: subtype 4, the chassis interface's MAC. It is the same on every port.
+  * Port ID: subtype 5, the interface name.
+  * TTL: `min(65535, msgTxInterval × msgTxHold + 1)` (9.2.5.22).
+  * Port Description: the alias, else the name.
+  * System Name and System Description.
+  * System Capabilities: router and station supported; router enabled when IPv4 or
+    IPv6 forwarding is on.
+  * Management Address: the first IPv4 address and the first IPv6 address (global
+    preferred), numbered by ifIndex, or the MAC if the port has no IP.
+  * End.
+* **Timing** (9.2.8, 9.2.10):
+  * The first frame goes out at once, followed by a fast start of `txFastInit`
+    frames 1 s apart, then one frame per `msgTxInterval`.
+  * A new neighbour reloads `txFast`, but only if it is 0.
+  * Every frame spends one credit. The credit refills by one per second, up to
+    `txCreditMax`.
+* **Local changes** (`somethingChangedLocal`). The port's LLDPDU is rebuilt on every
+  netlink event, hostname change and timer tick, and compared byte for byte with
+  the last one. If they differ, a frame goes out as soon as credit allows. In the
+  testbed, alias, hostname and address changes reached neighbours in 20–30 ms.
+* **Shutdown** (9.2.7 `mibConstrShutdownLLDPDU()`): only the mandatory TLVs, with
+  TTL 0.
+
+### Receive validation (8.2, 8.5, 9.2.7 rxProcessFrame)
+
+An LLDPDU is discarded, and counted in `statsFramesDiscardedTotal` /
+`statsFramesInErrorsTotal`, if any of these hold:
+
+| Rule | Logged as |
+|---|---|
+| a TLV header or length runs past the frame | `truncated TLV / length exceeds frame` |
+| TLV 1, 2 and 3 are not Chassis ID, Port ID and TTL, in that order | `first/second/third TLV is not …` |
+| there is no End Of LLDPDU, or it has a nonzero length | `missing End Of LLDPDU TLV` / `… with nonzero length` |
+| Chassis/Port ID length is not 2..256; the subtype is reserved (0, 8..255); a MAC subtype isn't 6 octets; a network-address subtype is under 2 octets | `invalid Chassis ID / Port ID TLV` |
+| TTL length ≠ 2 | `invalid TTL TLV length` |
+| Chassis ID, Port ID or TTL appears again | `mandatory TLV repeated` |
+| Port Desc / Sys Name / Sys Desc / Sys Cap appears twice | `single-instance optional TLV repeated` |
+| a string is over 255 octets; Sys Cap ≠ 4; org-specific is under 4; a Management Address's internal lengths don't add up (8.5.9) | `optional TLV has invalid length` |
+
+* **Accepted and skipped.** Reserved TLV types (9..126) are counted as
+  `statsTLVsUnrecognizedTotal` and skipped. Valid org-specific TLVs are counted and
+  skipped. Octets after End Of LLDPDU are padding.
+* **Bounds and storage.** Only `lldp_tlv_next()` walks received TLVs, and it refuses
+  any length past the buffer. Values are copied into fixed-size fields, so nothing
+  is allocated per frame.
+* **Ports.** Frames are ignored until the port is operational (portEnabled).
+  Frames carrying this system's own chassis ID are logged once as a loop and are
+  not recorded.
+* **Output escaping.** Every string from the wire is escaped before display:
+  `\xNN` in text, `\u00NN` in JSON. JSON output is pure ASCII and always parses.
+  A strict validator checks this in the unit tests and, in the fuzzer, for every
+  accepted frame.
+
+### Neighbour table (9.2.7, 9.2.9)
+
+* **Storage.** Each port has a fixed table of 32 entries, keyed by Chassis ID and
+  Port ID (subtype, length and bytes). When the table is full, new neighbours are
+  dropped (`tooManyNeighbors`) and existing ones keep refreshing.
+* **Updates.** A received frame produces an `ADD`, an `UPDATE` (content changed),
+  or a `REFRESH` (identical), and the entry's expiry restarts at `now + TTL`.
+* **Removal.** TTL 0 deletes the entry at once. Expiry gives an `AGEOUT`, which
+  reports the monotonic time since the last frame. Link down flushes the table.
+
+### Ports and links
+
+* **portEnabled** follows `IFF_UP && IFF_RUNNING` from rtnetlink.
+* **Down:** the port's neighbours are flushed and transmission stops.
+* **Up:** credit and fast start are re-initialised (9.2.7.12 `txInitializeLLDP()`),
+  no earlier than `reinitDelay` (2 s, 9.2.5.10) after the port went down.
+* **Hot-plug:** an interface that is deleted and recreated with the same name is
+  re-attached with a new socket. This also works after a privilege drop, because
+  `CAP_NET_RAW` is kept.
+
+### Privilege model
+
+* **`-U user`:** after opening its sockets the daemon calls `setgroups(0)`, `setgid`
+  and `setuid`. `capset` then leaves only `CAP_NET_RAW` permitted and effective, and
+  `PR_SET_NO_NEW_PRIVS` is set. Before continuing, the daemon checks that it can no
+  longer regain root.
+* **The systemd unit** reaches the same state declaratively: `DynamicUser=yes` and
+  `AmbientCapabilities=CAP_NET_RAW`, plus a read-only system, a syscall filter and
+  address-family restrictions.
+* **Control socket:** it is created mode 0600 and refuses to replace a live
+  daemon's socket or any non-socket file. Clients are non-blocking and limited to 8
+  slots; the oldest is evicted.
+
+## Standard references
+
+Comments cite IEEE Std 802.1AB-2016:
+* **Clauses 7 and 8** (addressing, TLV formats) are cited by number.
+* **Clause 9 numbers** were checked against IEEE 802.1 maintenance requests that
+  quote the standard ([0121](https://www.ieee802.org/1/files/public/maint/requests/maint_0121.pdf),
+  [0127](https://grouper.ieee.org/groups/802/1/files/public/maint/requests/maint_0127.pdf)):
+  msgFastTx 9.2.5.5, msgTxHold 9.2.5.6, msgTxInterval 9.2.5.7, reinitDelay 9.2.5.10,
+  txCreditMax 9.2.5.17, txFastInit 9.2.5.19, txTTL 9.2.5.22, txInitializeLLDP
+  9.2.7.12, transmit state machine 9.2.8, transmit timer state machine 9.2.10.
+* **Editions.** Those requests quote the 2009 edition. Zephyr cites msgTxHold as
+  9.2.5.6 against 2016, so the numbering carried over.
+* **Without a sub-number.** Procedures and variables that couldn't be confirmed to
+  a sub-clause are cited by name only: `rxProcessFrame()`, `rxInitializeLLDP()`,
+  `mibDeleteObjects()`, `tooManyNeighbors`, and the statistics counters.
 
 ## Decisions and deviations
 
-* **Development environment.** The host is Windows 11, so everything was built and run
-  in WSL2 (Ubuntu 24.04, kernel 6.18, gcc 13.3, clang 18, valgrind 3.22, tshark 4.2.2)
-  via `wsl -u root`. No source depends on that.
-* **Destination address.** Only the nearest-bridge group address `01:80:C2:00:00:0E` is
-  used for tx and rx. The nearest-non-TPMR (`…03`) and nearest-customer-bridge (`…00`)
-  addresses are not joined, and frames sent to them are discarded.
-* **Stricter-than-minimal validation.** The daemon rejects reserved Chassis/Port ID
-  subtypes, duplicate single-instance optional TLVs, and inconsistent Management
-  Address internal lengths. It is safer to drop such frames than to guess.
-* **One interface per process.** You run one instance per port, which keeps the code
-  single-threaded and simple.
-* **Not implemented.** The following parts of the agent are not implemented: fast-start
-  transmission (`txFast`), the transmit credit (`txCredit`/`msgFastTx`), `reinitDelay`,
-  transmitting on local-information change, the System Capabilities and Management
-  Address TLVs (both are *parsed*, not sent), the MIB/SNMP side, and VLAN-tagged LLDP.
-* **Clause references.** Comments cite 802.1AB-2016. Clause 7 (addressing) and clause 8
-  (8.4 TLV format, 8.5.x basic TLVs, 8.6 org-specific) are cited by number. Clause 9 is
-  cited by procedure and variable name (rxProcessFrame, mkShutdownLLDPDU, rxInfoAge,
-  msgTxInterval/msgTxHold, the `stats*` counters). The exact subclause numbers in
-  `main.c` should be checked against the text: this was written without the standard
-  at hand.
+* **Destination address.** Only the nearest-bridge address `01:80:C2:00:00:0E` is
+  used. The other two LLDP group addresses are neither joined nor accepted.
+* **Strictness.** Validation is stricter than the minimum: reserved ID subtypes,
+  duplicate single-instance TLVs and inconsistent Management Address lengths are
+  rejected.
+* **Fast start.** Fast start runs at start-up and on link up as well as for new
+  neighbours. `-f 0` disables fast transmission.
+* **Ports and interfaces.** Ports are identified by interface name, and interfaces
+  must exist at start-up (a missing name is more likely a typo than hot-plug).
+* **Chassis ID.** The chassis ID follows the chassis interface's MAC if that
+  changes.
+* **Capabilities.** Router and station are reported as supported, with router
+  enabled only while forwarding is on. This matches what lldpd reports for a Linux
+  host. Bridge membership is not detected.
+* **Management Address.** At most one IPv4 and one IPv6 address are sent, with no
+  OID. On receive the first 4 are stored, and all of them are validated.
+* **Not implemented.**
+  * The other two LLDP group addresses.
+  * Organisationally specific TLVs on transmit (802.1/802.3 extensions, LLDP-MED).
+  * The LLDP MIB/SNMP and notifications.
+  * VLAN-tagged LLDPDUs.
+  * Per-port timer settings.
+  * `adminStatus` values other than enabled (rx/tx-only modes).
 
-## Testbed (`scripts/testbed.sh`)
+## Testing
 
-```
-     lldp-ns1            lldp-ns2            lldp-ns3
-  eth0 02:..:01       eth0 02:..:02       eth0 02:..:03
-       |                   |                   |
-     brp1 ------------- brp2 -------------- brp3
-              br0 (Linux bridge, netns lldp-br)
-```
-
-The script uses four network namespaces (the bridge gets its own, so the host is
-untouched) with `-t 2 -H 3`, giving TTL = 7 s. A capture runs on bridge port `brp1`.
-
-> **Bridge forwarding.** `01:80:C2:00:00:0E` is a reserved link-local group address.
-> A standards-compliant bridge consumes it instead of forwarding it, which is the whole
-> point of "nearest bridge" LLDP. A Linux bridge therefore needs
-> `group_fwd_mask 0x4000` (bit 14 = `…0E`) before namespaces behind it can see each
-> other. Phase 0 demonstrates the default behaviour first.
-
-| Phase | What it does | What is checked |
+| Layer | What | Where |
 |---|---|---|
-| 0 | default bridge | no neighbour is learned (the bridge correctly drops `…0E`) |
-| 1 | `group_fwd_mask 0x4000` | all 6 directed adjacencies are learned (~1.1 s), each table shows 2 entries, and Port Description is received |
-| 2 | `inject_lldp.py` sends 10 malformed frames and 2 valid edge cases from ns2 | ns1 logs the exact rejection reason for each malformed frame, accepts the valid frame with a reserved TLV type and an org-specific TLV, deletes it again on its TTL-0 frame, and stays up |
-| 3 | `kill -9` the ns3 daemon and `ip netns del lldp-ns3` | ns1 and ns2 age ns3 out between TTL−TX and TTL after the kill, **exactly 7000 ms after its last LLDPDU** by the daemon's own monotonic clock, and do not age out each other |
-| 4 | `kill -INT` ns2 | ns1 deletes ns2 within ~12 ms via the shutdown LLDPDU, and ns2 exits 0 |
-| 5 | `kill -INT` ns1, then decode the capture with `tshark` | all daemon frames decode as LLDP with no malformed/expert warnings, the TTL-0 frames come only from ns1 and ns2, and the decoded chassis MAC, port ID, TTL, system name and port description of all three match |
+| Unit | TLV header (exhaustive round trip), builders vs hand-computed bytes, **byte-for-byte frame**, every parser rule and boundary, neighbour keying/ageing/flush, tx scheduling on a simulated clock, netlink parsing incl. malformed buffers, mgmt-address selection, JSON validity and escaping | `tests/test_*.c` |
+| Memory | all unit tests under valgrind (leaks are errors) and ASan+UBSan (`-fno-sanitize-recover`) | `make valgrind`, `make asan` |
+| Fuzz | random, mutated and structure-aware frames → Ethernet parse → LLDPDU validation → table → text/JSON, plus the netlink parser; invariants: re-encode round trip, valid JSON | `make fuzz`, `make libfuzzer` |
+| Raw socket | veth pair in a private netns: byte-exact delivery, multicast membership, EtherType filter, truncation, outgoing detection | `make rawsock-test` |
+| Testbed | 3 namespaces on a Linux bridge, 10 phases, tshark-decoded capture | `make testbed` |
+| Interop | lldpnd ↔ **lldpd 1.0.18**, both directions | `make interop` |
+| Service | the shipped systemd unit under real systemd | `scripts/service_check.sh` |
+| CI | all of the above on every push | `.github/workflows/ci.yml` |
 
-Artifacts are written to `build/testbed/`: `lldp.pcap`, `dissection.txt` (full
-`tshark -V -x` of a normal and a shutdown LLDPDU), `summary.tsv`, `ns{1,2,3}.log`, and
-`clock.log`. `BIN=build/asan/lldpnd` runs the daemons under ASan, and `VALGRIND=1` runs
-them under valgrind (a leak or error then shows up as a non-zero exit on SIGINT).
+### Testbed (`scripts/testbed.sh`)
 
-To watch or capture by hand while the testbed runs:
-
-```bash
-ip netns exec lldp-br tcpdump -i brp1 -nn -e -vv ether proto 0x88cc       # tcpdump decodes LLDP with -v
-ip netns exec lldp-br tcpdump -i brp1 -U --immediate-mode -w lldp.pcap ether proto 0x88cc
-tshark -r build/testbed/lldp.pcap -Y lldp -V            # Wireshark's LLDP dissector
-tshark -r build/testbed/lldp.pcap -Y '_ws.malformed'    # should list only injected frames
-wireshark build/testbed/lldp.pcap
+```
+            lldp-ns1                 lldp-ns2            lldp-ns3
+     eth0 02:..:01  eth1 02:..:11   eth0 02:..:02       eth0 02:..:03
+          |             |               |                   |
+        brp1          brp1b           brp2                brp3
+                   br0 (Linux bridge, in netns lldp-br)
 ```
 
-## Test results
+* **ns1** runs one daemon on two ports.
+* **ns2** runs as `nobody` in its own UTS namespace, so it advertises its hostname
+  live.
+* **ns3** is a plain instance.
 
-All of the following were run on 2026-10-02 from a clean build.
+`01:80:C2:00:00:0E` is a reserved link-local address that a standards-compliant
+bridge consumes. Phase 0 checks that nothing is learned through the default bridge;
+after that the bridge is configured with `group_fwd_mask 0x4000`.
+
+| Phase | Checked |
+|---|---|
+| 0 | the default bridge forwards nothing |
+| 1 | all 10 adjacencies are learned (ns1 is seen on both ports with one chassis ID); ns1 reports a loop on both ports |
+| 2 | `lldpnd-ctl json` from each daemon parses and shows names, alias-derived port descriptions, capabilities and management addresses; `show`, `stats`, `local` and unknown commands behave correctly |
+| 3 | 10 malformed frames are each rejected with the right reason; a valid frame with a reserved and an org-specific TLV is accepted, then deleted by its TTL 0 |
+| 4 | an alias change, a hostname change (via `nsenter`) and a new IPv6 address each reach ns1 in 20–30 ms (a periodic frame would take up to 2000 ms) |
+| 5 | ns2 runs as uid 65534 with `CapEff` = `0x2000` (CAP_NET_RAW) |
+| 6 | link flap: flush on down, re-learn about 1 s after up |
+| 7 | ns2's interface is deleted and recreated; the unprivileged daemon re-attaches and re-learns |
+| 8 | ns3 is killed and its namespace deleted; three ports age it out, each reporting **exactly 7000 ms** since its last frame (TTL 7 s) |
+| 9 | ns2 is stopped with SIGINT; ns1 deletes it on both ports within 10 ms |
+| 10 | tshark decodes every daemon frame with 0 malformed/expert flags; shutdown frames come from exactly ns1/eth0, ns1/eth1 and ns2; chassis, port, TTL, names, port description, capabilities `0x0090/0x0080` and IPv4/IPv6 management addresses all decode to the expected values |
+
+The testbed times itself with `/proc/uptime`, not the wall clock, which WSL2 steps
+by up to 1.5 s through Hyper-V time sync. `clock.log` records the drift for each
+run. Artifacts (`lldp.pcap`, `dissection.txt`, logs, JSON) go to `build/testbed/`.
+
+### Interoperability with lldpd (`scripts/interop_lldpd.sh`)
+
+* **lldpd decodes lldpnd:** chassis MAC, system name and description, port ifname,
+  alias-based port description, TTL, IPv4 and IPv6 management addresses, Router off
+  and Station on.
+* **lldpnd decodes lldpd:** chassis MAC, port ID as a MAC, name, capabilities,
+  IPv4 and IPv6 management addresses, and 802.3 org-specific TLVs. None of lldpd's
+  frames are rejected.
+* **Live changes:** an alias change reaches lldpd at once.
+* **Shutdowns:** each side's shutdown LLDPDU removes it from the other's table
+  within 50 ms.
+
+### Results
+
+Final run on 2026-10-03, from `make clean`, in WSL2:
 
 | Test | Result |
 |---|---|
-| `test_tlv`: header known values, exhaustive 128×512 encode/decode round trip, overflow, builders vs hand bytes, limits, iterator truncation | **PASS** (65 checks) |
-| `test_frame`: **byte-for-byte match of a full frame against a hand-computed 60-octet frame**, shutdown frame, padding, limits, SIOCGIFHWADDR errors | **PASS** (27) |
-| `test_lldpdu`: builder → parser round trip, every rejection rule, boundary lengths (255/256, 0, 511), escaping, ID formatting | **PASS** (179) |
-| `test_neigh`: keying (subtype-sensitive, prefix-safe), refresh/update, expiry exactly at TTL, TTL 0, table full, escaped printing | **PASS** (79) |
-| `test_rawsock` (veth pair in private netns): byte-identical A→B and B→A, multicast membership in `/proc/net/dev_mcast`, IPv4/0x88B5/0x88CD frames filtered, truncation flag, PACKET_OUTGOING | **PASS** (27) |
-| All of the above under **valgrind** (`--leak-check=full --errors-for-leak-kinds=all`) | **PASS**, 0 errors, 0 leaks |
-| All of the above under **ASan + UBSan** (`-fno-sanitize-recover=all`) | **PASS** |
-| Fuzz driver under ASan+UBSan: 2 M iterations (seed default) + 10 M (seed `0xdeadbeef`), split evenly between random, seed-mutation and structure-aware generation; every rejection path hit; accepted frames re-encoded and re-parsed identically | **PASS**: no crashes or sanitizer reports, round-trip invariant held |
-| libFuzzer (clang 18) + ASan + UBSan, 121 s | **PASS**: 15.2 M execs (~126 k/s), 176 edges, 249-input corpus, no crashes |
-| Testbed, plain build (3 consecutive runs) | **41/41 PASS** each |
-| Testbed with daemons under ASan+UBSan | **41/41 PASS**, no sanitizer output |
-| Testbed with daemons under valgrind | **41/41 PASS**, 0 valgrind messages, exit 0 |
-| `idle_check.sh` (`-t 5`, 20 s) | 4 wakeups, 0 ms CPU, waiting in `do_epoll_wait` |
+| Build, gcc 13.3 and clang 18, `-Werror` | clean |
+| Unit tests: 7 suites, gcc and clang | **609/609** |
+| Unit tests under valgrind (`--errors-for-leak-kinds=all`) | **609/609**, 0 errors, 0 leaks |
+| Unit tests under ASan+UBSan | **609/609** |
+| Fuzz driver under ASan+UBSan, 3M (default seed) + 10M (seed `0xdeadbeef`) | no crashes or sanitizer reports; round-trip and JSON-validity invariants held for every accepted frame |
+| libFuzzer + ASan+UBSan, 121 s | 22.5M executions (~186k/s), 383 edges, 523-input corpus, no crashes |
+| Raw-socket test, plain and ASan | **27/27** each |
+| Testbed, plain | **76/76** |
+| Testbed, daemons under ASan+UBSan | **76/76**, no sanitizer output |
+| Testbed, daemons under valgrind | **76/76**, no valgrind output |
+| Interop with lldpd 1.0.18 | **29/29** |
+| systemd unit under real systemd | **14/14**; `systemd-analyze security` exposure 1.9 (OK) |
+| Idle steady state, `-t 5`, 20 s | 4 wake-ups (one per frame), 0 ms CPU, in `do_epoll_wait` |
+| CLI and control-socket edge cases (bad ranges, unknown interface or user, `-U root`, live or stale or regular file at the socket path) | 19/19 correct exit codes; never replaces a live socket or a regular file |
 
-### Problems found along the way, and what was done
+### Bugs found by the tests, and fixes
 
-1. **ASan caught three out-of-bounds reads, all in test code, none in the daemon.**
-   * Two were in `test_lldpdu.c`: a 400-byte buffer used to build a 511-octet TLV, and a
-     5-byte string literal passed with length 8.
-   * One was in the fuzz harness's structured generator: a 7-byte literal read up to 8.
+1. **Netlink over-read.** The fuzzer found an over-read in the netlink parser.
+   `NLMSG_NEXT` subtracts the *aligned* message length, so with an `unsigned`
+   remaining count a final unaligned message wrapped the counter, and `NLMSG_OK`
+   then walked past the buffer. The macros were replaced by an explicitly
+   bounds-checked iterator, which also fixes a Clang `-Wsign-compare` error from the
+   macros. A regression test feeds the exact input in an exactly-sized heap buffer.
+2. **Bugs in test code.** ASan found three out-of-bounds reads in test and harness
+   code (literals shorter than the length passed). GCC's `-Warray-bounds` found an
+   out-of-bounds index in a new test. Valgrind missed the stack and global cases.
+3. **Behaviour fixes from the testbed and smoke tests:**
+   * Frames were processed in the up-to-1 s window before the kernel reported the
+     link running. They are now dropped until portEnabled.
+   * `ENETDOWN` from a packet socket was logged as an error.
+   * A spurious "local change" was logged when IPv6 link-local addresses appeared
+     right after link up.
+4. **Test-harness bugs:**
+   * libpcap's ring buffer held the last frame when tcpdump was stopped (fixed with
+     `--immediate-mode`).
+   * `tshark -c` counts packets read, not packets matched.
+   * The wall-clock stopwatch was replaced with a monotonic one.
+   * `/proc` status fields are separated by tabs.
+   * lldpd's privilege-separated child needs its socket directory to be traversable.
+   * valgrind's gdbserver FIFOs can't be removed after the daemon drops privileges
+     (fixed with `--vgdb=no`).
+5. **Wireshark 4.2.2 display quirk, not a defect.** On LLDP frames longer than 60
+   octets, Wireshark shows the last 3 octets as an Ethernet "trailer". Frames built
+   independently in Python show the same thing, and every TLV still decodes with no
+   malformed or expert flag.
 
-   Valgrind did not flag the two stack/global ones, since memcheck doesn't track array
-   bounds. That is a good argument for running both tools. All three were fixed.
-2. **No defect was found in the daemon/parser code** by unit tests, valgrind, ASan/UBSan,
-   ~27 M fuzz executions, or the testbed.
-3. **Testbed: the last frame was missing from the capture.** libpcap's TPACKET_V3 ring
-   hands packets to tcpdump only when a block retires, so ns1's final shutdown LLDPDU
-   was still buffered when tcpdump was stopped. tcpdump itself reported "30 received by
-   filter, 29 captured". The fix is `--immediate-mode` plus a short drain delay.
-4. **Testbed: `tshark -c 1 -Y …` returned nothing.** `-c` counts packets *read*, not
-   matched. The fix is `| head -1`.
-5. **Testbed: one run reported ageout at 8.7 s for a 7 s TTL.** The stopwatch was the
-   problem, not the daemon. WSL2's realtime clock is stepped by Hyper-V time sync and
-   timesyncd: the new `clock.log` recorded steps of 692 ms and 1558 ms relative to
-   monotonic during later runs. The testbed now:
-   * times itself with `/proc/uptime` (CLOCK_BOOTTIME);
-   * uses millisecond log timestamps;
-   * has the daemon report the monotonic time between a neighbour's last LLDPDU and its
-     removal.
+## Development environment
 
-   That self-reported figure was exactly 7000 ms in all 10 measurements across 5 runs,
-   so ageing is precise. The assertion was also tightened to [TTL, TTL+250 ms].
-6. **A Wireshark 4.2.2 display quirk (not a defect).** For any LLDP frame longer than the
-   60-octet minimum, Wireshark shows the final 3 octets (the last value byte plus End
-   Of LLDPDU) as an Ethernet "Trailer". Every TLV, End included, still decodes with the
-   right length, and no malformed or expert flag is raised. Frames generated
-   independently in Python show the same thing, and the byte-for-byte unit test pins
-   down the encoding.
+This was developed on Windows 11 in WSL2 (Ubuntu 24.04, kernel 6.18, gcc 13.3,
+clang 18, valgrind 3.22, tshark 4.2.2, lldpd 1.0.18), with root via `wsl -u root`.
+Nothing in the code depends on WSL. From Windows:
+
+```bash
+wsl -d Ubuntu-24.04 -u root --cd /mnt/d/lldp -- make check
+```
+
+## License
+
+No license has been chosen yet. Until one is added, the default copyright rules
+apply.

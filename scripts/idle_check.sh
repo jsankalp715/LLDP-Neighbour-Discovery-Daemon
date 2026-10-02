@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # idle_check.sh - show that an idle lldpnd sleeps in epoll_wait (no busy-wait):
-# count its wakeups (voluntary context switches) and CPU time over a window.
+# count its wakeups (voluntary context switches) and CPU time over a window
+# once start-up activity is over.
 # Runs in a private network namespace. Root required.
 #   scripts/idle_check.sh [tx-interval=5] [window-seconds=20]
 set -eu
@@ -13,9 +14,11 @@ exec unshare --net bash -s "$BIN" "$TX" "$WIN" <<'EOF'
 BIN=$1 TX=$2 WIN=$3
 ip link add idA type veth peer name idB
 ip link set idA up; ip link set idB up
-"$BIN" -i idA -t "$TX" >/dev/null &
+"$BIN" -i idA -t "$TX" -S none >/dev/null &
 P=$!
-sleep 0.5
+# let start-up settle: fast-start frames (1 s apart), link-up and IPv6
+# link-local address notifications; then measure the steady state
+sleep 6
 ctx() { awk '/^voluntary_ctxt_switches/ {print $2}' /proc/$P/status; }
 cpu() { awk '{print $14 + $15}' /proc/$P/stat; }   # utime + stime, clock ticks
 c0=$(ctx); t0=$(cpu)
