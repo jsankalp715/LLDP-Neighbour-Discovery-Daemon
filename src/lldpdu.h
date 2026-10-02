@@ -15,20 +15,38 @@
 /* Largest frame we ever build or accept: header + 1500-octet payload */
 #define LLDP_FRAME_MAX   (ETH_HDR_LEN + ETH_MAX_PAYLOAD)
 
-/* Information this agent advertises about its own port */
+/* Management addresses kept per LLDPDU (more are validated but not stored) */
+#define LLDP_MAX_MGMT    4
+
+/* One Management Address TLV (8.5.9), without its object identifier */
+struct lldp_mgmt {
+	uint8_t  subtype;                  /* IANA address family */
+	uint8_t  len;                      /* 1..31 */
+	uint8_t  addr[LLDP_MGMT_ADDR_MAX];
+	uint8_t  if_subtype;
+	uint32_t if_number;
+};
+
+/* Information this agent advertises on one port */
 struct lldp_local_info {
-	uint8_t     mac[ETH_ADDR_LEN];  /* chassis ID (subtype 4) */
-	const char *ifname;             /* port ID (subtype 5) */
-	uint16_t    ttl;                /* 0 => shutdown LLDPDU */
-	const char *port_desc;          /* optional, NULL to omit */
-	const char *sys_name;           /* optional, NULL to omit */
-	const char *sys_desc;           /* optional, NULL to omit */
+	uint8_t     chassis_mac[ETH_ADDR_LEN];  /* chassis ID (subtype 4), per system */
+	uint8_t     port_mac[ETH_ADDR_LEN];     /* Ethernet source address */
+	const char *ifname;                     /* port ID (subtype 5) */
+	uint16_t    ttl;                        /* 0 => shutdown LLDPDU */
+	const char *port_desc;                  /* optional, NULL to omit */
+	const char *sys_name;                   /* optional, NULL to omit */
+	const char *sys_desc;                   /* optional, NULL to omit */
+	int         has_sys_cap;
+	uint16_t    sys_cap;
+	uint16_t    sys_cap_enabled;
+	unsigned    n_mgmt;
+	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
 };
 
 /*
  * Build an LLDPDU (TLV sequence, no Ethernet header). When ttl == 0 a
  * shutdown LLDPDU is built: only Chassis ID, Port ID, TTL and End
- * (9.2.7, mkShutdownLLDPDU). Returns length or -1.
+ * (9.2.7, mibConstrShutdownLLDPDU). Returns length or -1.
  */
 ssize_t lldpdu_build(const struct lldp_local_info *li, uint8_t *out, size_t cap);
 
@@ -59,7 +77,9 @@ struct lldp_msg {
 	int             has_sys_cap;
 	uint16_t        sys_cap;
 	uint16_t        sys_cap_enabled;
-	unsigned        n_mgmt_addr;
+	unsigned        n_mgmt_addr;        /* all valid Management Address TLVs */
+	unsigned        n_mgmt;             /* stored in mgmt[], <= LLDP_MAX_MGMT */
+	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
 	unsigned        n_org_tlvs;
 	unsigned        n_unknown_tlvs;     /* reserved types 9..126 */
 };
@@ -98,8 +118,21 @@ void lldp_escape(const uint8_t *s, size_t n, char *out, size_t cap);
 /* Human-readable chassis/port ID (MAC subtypes as aa:bb:.., names escaped) */
 void lldp_id_format(const struct lldp_id *id, int is_chassis, char *out, size_t cap);
 
+/* Short name of a chassis/port ID subtype ("mac", "ifname", ...) */
+const char *lldp_id_subtype_name(uint8_t subtype, int is_chassis);
+
+/* Capability bitmap as comma-separated names, "-" if none (8.5.8.1) */
+void lldp_caps_format(uint16_t caps, char *out, size_t cap);
+/* Name of a single capability bit (0..15), or NULL if reserved */
+const char *lldp_cap_name(unsigned bit);
+
+/* Management address as "192.0.2.1" / "2001:db8::1" / "mac 02:..", else hex */
+void lldp_mgmt_format(const struct lldp_mgmt *m, char *out, size_t cap);
+
 /* Buffer sizes sufficient for the formatters above */
 #define LLDP_ESC_MAX     (4 * 255 + 1)
 #define LLDP_IDFMT_MAX   (LLDP_ESC_MAX + 16)
+#define LLDP_CAPFMT_MAX  128
+#define LLDP_MGMTFMT_MAX 128
 
 #endif

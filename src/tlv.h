@@ -52,6 +52,33 @@ enum lldp_port_subtype {
 	LLDP_PORT_LOCAL          = 7,
 };
 
+/* System capabilities bits, 8.5.8.1 / Table 8-4 */
+#define LLDP_CAP_OTHER      0x0001u
+#define LLDP_CAP_REPEATER   0x0002u
+#define LLDP_CAP_BRIDGE     0x0004u
+#define LLDP_CAP_WLAN_AP    0x0008u
+#define LLDP_CAP_ROUTER     0x0010u
+#define LLDP_CAP_TELEPHONE  0x0020u
+#define LLDP_CAP_DOCSIS     0x0040u
+#define LLDP_CAP_STATION    0x0080u
+#define LLDP_CAP_CVLAN      0x0100u
+#define LLDP_CAP_SVLAN      0x0200u
+#define LLDP_CAP_TPMR       0x0400u
+
+/* Management address subtypes: IANA Address Family Numbers (8.5.9.3) */
+#define LLDP_AF_IPV4        1u
+#define LLDP_AF_IPV6        2u
+#define LLDP_AF_ALL802      6u      /* 48-bit MAC address */
+
+/* Management address interface numbering subtype (8.5.9.5) */
+#define LLDP_IFNUM_UNKNOWN  1u
+#define LLDP_IFNUM_IFINDEX  2u
+#define LLDP_IFNUM_SYSPORT  3u
+
+/* Management address string is 1..31 octets after its subtype (8.5.9.2-4) */
+#define LLDP_MGMT_ADDR_MAX  31u
+#define LLDP_MGMT_OID_MAX   128u
+
 /* Chassis ID / Port ID string is 1..255 octets (8.5.2.3, 8.5.3.3) */
 #define LLDP_ID_MAX_LEN    255u
 /* Port Description, System Name, System Description: 0..255 (8.5.5-8.5.7) */
@@ -86,6 +113,10 @@ int lldp_tlv_put_ttl(struct lldp_buf *b, uint16_t ttl);
 int lldp_tlv_put_port_desc(struct lldp_buf *b, const char *s);
 int lldp_tlv_put_sys_name(struct lldp_buf *b, const char *s);
 int lldp_tlv_put_sys_desc(struct lldp_buf *b, const char *s);
+int lldp_tlv_put_sys_cap(struct lldp_buf *b, uint16_t supported, uint16_t enabled);
+int lldp_tlv_put_mgmt_addr(struct lldp_buf *b, uint8_t addr_subtype,
+			   const void *addr, size_t addr_len,
+			   uint8_t if_subtype, uint32_t if_number);
 int lldp_tlv_put_end(struct lldp_buf *b);
 
 /* A decoded TLV; value points into the caller's buffer. */

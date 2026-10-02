@@ -40,7 +40,8 @@ static void test_roundtrip_builder(void)
 {
 	uint8_t buf[1500];
 	struct lldp_local_info li = {
-		.mac = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
+		.chassis_mac = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
+		.port_mac = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01 },
 		.ifname = "veth-ns1", .ttl = 4321,
 		.port_desc = "to bridge", .sys_name = "host-1",
 		.sys_desc = "Linux 6.6 x86_64",
@@ -51,7 +52,7 @@ static void test_roundtrip_builder(void)
 	CHECK(n > 0);
 	CHECK(lldpdu_parse(buf, (size_t)n, &m) == LLDP_OK);
 	CHECK(m.chassis.subtype == LLDP_CHASSIS_MAC && m.chassis.len == 6);
-	CHECK_MEM(m.chassis.id, li.mac, 6);
+	CHECK_MEM(m.chassis.id, li.chassis_mac, 6);
 	CHECK(m.port.subtype == LLDP_PORT_IF_NAME && m.port.len == 8);
 	CHECK_MEM(m.port.id, "veth-ns1", 8);
 	CHECK(m.ttl == 4321);
@@ -305,6 +306,110 @@ static void test_strerror_and_format(void)
 	CHECK(strcmp(out, "eth0(st5)") == 0);
 }
 
+static void test_caps_and_mgmt(void)
+{
+	uint8_t buf[1500];
+	struct lldp_local_info li = {
+		.chassis_mac = { 0x02, 0, 0, 0, 0, 0x10 },
+		.port_mac = { 0x02, 0, 0, 0, 0, 0x11 },
+		.ifname = "eth0", .ttl = 120,
+		.has_sys_cap = 1, .sys_cap = LLDP_CAP_BRIDGE | LLDP_CAP_ROUTER,
+		.sys_cap_enabled = LLDP_CAP_ROUTER,
+		.n_mgmt = 3,
+		.mgmt = {
+			{ LLDP_AF_IPV4, 4, { 192, 0, 2, 7 }, LLDP_IFNUM_IFINDEX, 5 },
+			{ LLDP_AF_IPV6, 16, { 0x20, 0x01, 0x0d, 0xb8, [15] = 0x07 },
+			  LLDP_IFNUM_IFINDEX, 5 },
+			{ LLDP_AF_ALL802, 6, { 0x02, 0, 0, 0, 0, 0x11 }, LLDP_IFNUM_UNKNOWN, 0 },
+		},
+	};
+	struct lldp_msg m;
+	char out[LLDP_MGMTFMT_MAX];
+	struct pdu p;
+	ssize_t n;
+	unsigned i;
+
+	n = lldpdu_build(&li, buf, sizeof buf);
+	CHECK(n > 0);
+	CHECK(lldpdu_parse(buf, (size_t)n, &m) == LLDP_OK);
+	CHECK(m.has_sys_cap && m.sys_cap == 0x14 && m.sys_cap_enabled == 0x10);
+	CHECK(m.n_mgmt_addr == 3 && m.n_mgmt == 3);
+	for (i = 0; i < 3; i++) {
+		CHECK(m.mgmt[i].subtype == li.mgmt[i].subtype);
+		CHECK(m.mgmt[i].len == li.mgmt[i].len);
+		CHECK_MEM(m.mgmt[i].addr, li.mgmt[i].addr, li.mgmt[i].len);
+		CHECK(m.mgmt[i].if_subtype == li.mgmt[i].if_subtype);
+		CHECK(m.mgmt[i].if_number == li.mgmt[i].if_number);
+	}
+	lldp_mgmt_format(&m.mgmt[0], out, sizeof out);
+	CHECK(strcmp(out, "192.0.2.7") == 0);
+	lldp_mgmt_format(&m.mgmt[1], out, sizeof out);
+	CHECK(strcmp(out, "2001:db8::7") == 0);
+	lldp_mgmt_format(&m.mgmt[2], out, sizeof out);
+	CHECK(strcmp(out, "mac 02:00:00:00:00:11") == 0);
+
+	/* unknown family / wrong length falls back to hex */
+	{
+		struct lldp_mgmt odd = { 99, 3, { 0xde, 0xad, 0x01 }, 1, 0 };
+		lldp_mgmt_format(&odd, out, sizeof out);
+		CHECK(strcmp(out, "af99:dead01") == 0);
+		odd.subtype = LLDP_AF_IPV4;               /* IPv4 but 3 octets */
+		lldp_mgmt_format(&odd, out, sizeof out);
+		CHECK(strcmp(out, "af1:dead01") == 0);
+		lldp_mgmt_format(&odd, out, 5);           /* truncation is safe */
+		CHECK(strlen(out) <= 4);
+	}
+
+	/* shutdown LLDPDU omits capabilities and addresses */
+	li.ttl = 0;
+	n = lldpdu_build(&li, buf, sizeof buf);
+	CHECK(lldpdu_parse(buf, (size_t)n, &m) == LLDP_OK);
+	CHECK(!m.has_sys_cap && m.n_mgmt_addr == 0);
+
+	/* more Management Address TLVs than we store: all validated, 4 kept */
+	memset(&p, 0, sizeof p); mandatory(&p);
+	for (i = 0; i < 6; i++) {
+		uint8_t v[12] = { 5, 1, 10, 0, 0, (uint8_t)i, 2, 0, 0, 0, 1, 0 };
+		raw(&p, 8, sizeof v, v);
+	}
+	end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK);
+	CHECK(m.n_mgmt_addr == 6 && m.n_mgmt == LLDP_MAX_MGMT);
+	CHECK(m.mgmt[3].addr[3] == 3);
+
+	/* management address with an OID is accepted (OID not stored) */
+	memset(&p, 0, sizeof p); mandatory(&p);
+	raw(&p, 8, 15, "\x05\x01\x0a\x00\x00\x01\x02\x00\x00\x00\x03\x03\x2b\x06\x01");
+	end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK && m.n_mgmt == 1);
+	CHECK(m.mgmt[0].if_number == 3);
+}
+
+static void test_names(void)
+{
+	char out[LLDP_CAPFMT_MAX];
+
+	lldp_caps_format(0, out, sizeof out);
+	CHECK(strcmp(out, "-") == 0);
+	lldp_caps_format(LLDP_CAP_BRIDGE | LLDP_CAP_ROUTER | LLDP_CAP_TPMR, out, sizeof out);
+	CHECK(strcmp(out, "bridge,router,tpmr") == 0);
+	lldp_caps_format(0x8001, out, sizeof out);           /* reserved bit 15 */
+	CHECK(strcmp(out, "other,bit15") == 0);
+	lldp_caps_format(0xffff, out, sizeof out);
+	CHECK(strstr(out, "station") != NULL && strstr(out, "bit15") != NULL);
+	lldp_caps_format(0xffff, out, 20);                   /* never overflows */
+	CHECK(strlen(out) < 20);
+	CHECK(lldp_cap_name(7) && strcmp(lldp_cap_name(7), "station") == 0);
+	CHECK(lldp_cap_name(11) == NULL);
+
+	CHECK(strcmp(lldp_id_subtype_name(4, 1), "mac") == 0);
+	CHECK(strcmp(lldp_id_subtype_name(3, 0), "mac") == 0);
+	CHECK(strcmp(lldp_id_subtype_name(5, 0), "ifname") == 0);
+	CHECK(strcmp(lldp_id_subtype_name(6, 1), "ifname") == 0);
+	CHECK(strcmp(lldp_id_subtype_name(0, 1), "reserved") == 0);
+	CHECK(strcmp(lldp_id_subtype_name(200, 0), "reserved") == 0);
+}
+
 int main(void)
 {
 	RUN(test_roundtrip_builder);
@@ -312,5 +417,7 @@ int main(void)
 	RUN(test_missing_and_order);
 	RUN(test_bad_lengths);
 	RUN(test_strerror_and_format);
+	RUN(test_caps_and_mgmt);
+	RUN(test_names);
 	return test_report("test_lldpdu");
 }

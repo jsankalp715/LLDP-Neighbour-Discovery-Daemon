@@ -1,0 +1,8 @@
+# /etc/default/lldpnd - options for lldpnd.service
+#
+# Interfaces are required. Examples:
+#   LLDPND_OPTS="-i eth0"
+#   LLDPND_OPTS="-i eno1,eno2 -t 30"
+# The control socket (/run/lldpnd/lldpnd.sock) and the unprivileged user are
+# set up by the unit; query with:  lldpnd-ctl -S /run/lldpnd/lldpnd.sock
+LLDPND_OPTS="-i eth0"

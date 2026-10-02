@@ -125,7 +125,9 @@ ssize_t lldp_sock_recv(struct lldp_sock *s, uint8_t *buf, size_t cap,
 	/* MSG_TRUNC: return the real frame length even if it exceeds cap */
 	n = recvfrom(s->fd, buf, cap, MSG_TRUNC, (struct sockaddr *)&from, &fromlen);
 	if (n < 0) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+		/* ENETDOWN: the link went down; reported once, then cleared */
+		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ||
+		    errno == ENETDOWN)
 			return 0;
 		return -1;
 	}

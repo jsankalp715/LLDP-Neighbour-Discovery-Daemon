@@ -168,18 +168,97 @@ static void test_print_escapes(void)
 	CHECK(f != NULL);
 	if (!f)
 		return;
-	neigh_print(&tbl, 4000, f);
+	neigh_print(&tbl, "eth9", 4000, f);
 	fclose(f);
 	CHECK(strstr(buf, "1 entry") != NULL);
 	CHECK(strstr(buf, "chassis 02:00:00:00:00:ab port eth0(st5)") != NULL);
 	CHECK(strstr(buf, "\\x1b[2Jevl") != NULL);
 	CHECK(strchr(buf, 0x1b) == NULL);
 	CHECK(strstr(buf, "expires in 6000 ms") != NULL);
+	CHECK(strstr(buf, "eth9 neighbour table") != NULL);
 	free(buf);
+}
+
+static void test_caps_mgmt_changes(void)
+{
+	struct lldp_msg m = msg(1, "eth0", 10);
+	const struct neigh *n;
+	char *buf = NULL;
+	size_t len = 0;
+	FILE *f;
+
+	neigh_init(&tbl);
+	m.has_sys_cap = 1;
+	m.sys_cap = m.sys_cap_enabled = LLDP_CAP_STATION;
+	m.n_mgmt = m.n_mgmt_addr = 1;
+	m.mgmt[0] = (struct lldp_mgmt){ LLDP_AF_IPV4, 4, { 10, 0, 0, 1 }, LLDP_IFNUM_IFINDEX, 7 };
+	m.n_org_tlvs = 2;
+	CHECK(neigh_update(&tbl, &m, SRC, 0, &n) == NEIGH_ADDED);
+	CHECK(n->has_sys_cap && n->sys_cap == LLDP_CAP_STATION && n->n_mgmt == 1);
+	CHECK(neigh_update(&tbl, &m, SRC, 1, NULL) == NEIGH_REFRESHED);
+
+	/* a changed management address is an update */
+	m.mgmt[0].addr[3] = 2;
+	CHECK(neigh_update(&tbl, &m, SRC, 2, &n) == NEIGH_UPDATED);
+	CHECK(n->mgmt[0].addr[3] == 2);
+	/* so is a new address, a changed interface number, and capabilities */
+	m.n_mgmt = 2;
+	m.mgmt[1] = (struct lldp_mgmt){ LLDP_AF_IPV6, 16, { 0xfe, 0x80 }, LLDP_IFNUM_IFINDEX, 7 };
+	CHECK(neigh_update(&tbl, &m, SRC, 3, NULL) == NEIGH_UPDATED);
+	m.mgmt[1].if_number = 8;
+	CHECK(neigh_update(&tbl, &m, SRC, 4, NULL) == NEIGH_UPDATED);
+	m.sys_cap_enabled = 0;
+	CHECK(neigh_update(&tbl, &m, SRC, 5, NULL) == NEIGH_UPDATED);
+	m.has_sys_cap = 0;
+	CHECK(neigh_update(&tbl, &m, SRC, 6, NULL) == NEIGH_UPDATED);
+	CHECK(neigh_update(&tbl, &m, SRC, 7, NULL) == NEIGH_REFRESHED);
+
+	m.has_sys_cap = 1;
+	m.sys_cap = LLDP_CAP_BRIDGE | LLDP_CAP_ROUTER;
+	m.sys_cap_enabled = LLDP_CAP_ROUTER;
+	neigh_update(&tbl, &m, SRC, 8, NULL);
+	f = open_memstream(&buf, &len);
+	CHECK(f != NULL);
+	if (!f)
+		return;
+	neigh_print(&tbl, NULL, 8, f);
+	fclose(f);
+	CHECK(strstr(buf, "---- neighbour table: 1 entry") != NULL);
+	CHECK(strstr(buf, "capabilities bridge,router (enabled: router)") != NULL);
+	CHECK(strstr(buf, "mgmt addr    10.0.0.2 (if ifindex 7)") != NULL);
+	CHECK(strstr(buf, "mgmt addr    fe80:: (if ifindex 8)") != NULL);
+	CHECK(strstr(buf, "2 org-specific, 0 unrecognised") != NULL);
+	free(buf);
+}
+
+static unsigned flushed;
+static void flush_cb(const struct neigh *n, void *ctx)
+{
+	(void)ctx;
+	CHECK(n->in_use);
+	flushed++;
+}
+
+static void test_flush(void)
+{
+	struct lldp_msg a = msg(1, "eth0", 10), b = msg(2, "eth0", 10);
+	uint64_t when;
+
+	neigh_init(&tbl);
+	neigh_update(&tbl, &a, SRC, 0, NULL);
+	neigh_update(&tbl, &b, SRC, 0, NULL);
+	flushed = 0;
+	CHECK(neigh_flush(&tbl, flush_cb, NULL) == 2);
+	CHECK(flushed == 2 && tbl.count == 0);
+	CHECK(neigh_next_expiry(&tbl, &when) == 0);
+	CHECK(neigh_flush(&tbl, NULL, NULL) == 0);
+	CHECK(neigh_update(&tbl, &a, SRC, 1, NULL) == NEIGH_ADDED);
 }
 
 int main(void)
 {
+	RUN(test_caps_mgmt_changes);
+	RUN(test_flush);
 	RUN(test_add_refresh_update);
 	RUN(test_keying);
 	RUN(test_ageing);

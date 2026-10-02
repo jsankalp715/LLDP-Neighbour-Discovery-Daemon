@@ -53,7 +53,8 @@ static const uint8_t expected_shutdown[60] = {
 static struct lldp_local_info sample(void)
 {
 	struct lldp_local_info li = {
-		.mac = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 },
+		.chassis_mac = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 },
+		.port_mac = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 },
 		.ifname = "eth0",
 		.ttl = 121,
 		.port_desc = "uplink",
