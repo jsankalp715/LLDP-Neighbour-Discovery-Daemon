@@ -51,7 +51,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            tcpdump tshark lldpd python3 iproute2 util-linux groff-base
+            tcpdump tshark lldpd python3 iproute2 util-linux groff-base valgrind
           # the packaged lldpd would start on the runner's own NIC; we run our own
           sudo systemctl disable --now lldpd || true
       - name: Build (plain and ASan)
@@ -65,6 +65,10 @@ jobs:
           sudo env BIN="$PWD/build/asan/lldpnd" CTL="$PWD/build/asan/lldpnd-ctl" \
             OUT="$PWD/build/testbed-asan" bash scripts/testbed.sh
           ! grep -lE "Sanitizer|runtime error" build/testbed-asan/*.log
+      - name: Testbed with daemons under valgrind (incl. the privilege-dropped one)
+        run: |
+          sudo env VALGRIND=1 OUT="$PWD/build/testbed-valgrind" bash scripts/testbed.sh
+          ! grep -h "==[0-9]*==" build/testbed-valgrind/ns*.log
       - name: Interoperability with lldpd
         run: sudo make interop
       - name: systemd unit under real systemd
@@ -77,5 +81,6 @@ jobs:
           path: |
             build/testbed
             build/testbed-asan
+            build/testbed-valgrind
             build/interop
           if-no-files-found: ignore

@@ -176,7 +176,12 @@ ip netns exec lldp-ns1 $RUN -i eth0,eth1 $COMMON -n ns1 -S "$(sock 1)" >"$(log 1
 PID[ns1]=$!
 # ns2: own UTS namespace, System Name from the hostname, unprivileged after start-up
 ip netns exec lldp-ns2 unshare --uts sh -c \
-	"hostname ns2 && exec $RUN -i eth0 $COMMON -S $(sock 2) -U nobody" >"$(log 2)" 2>&1 &
+	"hostname ns2 && exec env ASAN_OPTIONS=detect_leaks=0 $RUN -i eth0 $COMMON -S $(sock 2) -U nobody" \
+	>"$(log 2)" 2>&1 &
+# (detect_leaks=0, ASan builds only: LeakSanitizer's exit-time check must
+#  ptrace the process, which is non-dumpable after the privilege drop, and
+#  CI runners refuse the attach. ASan's memory-error checks stay on; leaks on
+#  this path are covered by the valgrind run, which needs no ptrace.)
 PID[ns2]=$!
 ip netns exec lldp-ns3 $RUN -i eth0 $COMMON -n ns3 -S "$(sock 3)" >"$(log 3)" 2>&1 &
 PID[ns3]=$!
