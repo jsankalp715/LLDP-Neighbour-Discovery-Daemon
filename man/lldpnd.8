@@ -1,0 +1,151 @@
+.TH LLDPND 8 "October 2026" "lldpnd" "System Administration"
+.SH NAME
+lldpnd \- LLDP (IEEE 802.1AB) neighbour discovery daemon
+.SH SYNOPSIS
+.B lldpnd
+.B \-i
+.IR interface [, interface ...]
+.RB [ \-c
+.IR interface ]
+.RB [ \-t
+.IR seconds ]
+.RB [ \-H
+.IR hold ]
+.RB [ \-f
+.IR count ]
+.RB [ \-C
+.IR credit ]
+.RB [ \-p
+.IR seconds ]
+.RB [ \-n
+.IR name ]
+.RB [ \-d
+.IR description ]
+.RB [ \-P
+.IR description ]
+.RB [ \-M ]
+.RB [ \-S
+.IR path ]
+.RB [ \-U
+.IR user ]
+.SH DESCRIPTION
+.B lldpnd
+implements the Link Layer Discovery Protocol over raw
+.B AF_PACKET
+sockets.
+On each interface it periodically transmits an LLDPDU describing this
+system to the nearest-bridge group address 01:80:C2:00:00:0E, and keeps a
+table of the neighbours it hears, removing each one when its advertised
+time-to-live expires or when it sends a shutdown LLDPDU.
+.PP
+Advertised TLVs: Chassis ID (MAC address of the chassis interface, the
+same on every port), Port ID (interface name), TTL, Port Description,
+System Name, System Description, System Capabilities, Management Address
+(the interface's first IPv4 and IPv6 address, else its MAC) and End Of
+LLDPDU.
+.PP
+Received LLDPDUs are validated strictly and discarded if malformed:
+TLV lengths that run past the frame, missing or misordered mandatory
+TLVs, reserved Chassis/Port ID subtypes, repeated TLVs and illegal
+lengths are all rejected.
+Unrecognised TLV types are counted and skipped.
+.PP
+Local changes are advertised immediately (rate-limited by the transmit
+credit): interface alias, MAC, IP addresses, operational state, and the
+hostname when
+.B \-n
+is not given.
+When an interface goes down its neighbours are flushed; when it comes
+back the daemon re-initialises after a 2-second reinitDelay and starts
+with a burst of fast transmissions.
+An interface that disappears and reappears with the same name is
+re-attached.
+.PP
+LLDPDUs carrying this system's own chassis ID (another of its ports
+bridged to this one) are not recorded; a loop warning is logged once.
+.PP
+The daemon is single-threaded, event-driven (epoll, timerfd, signalfd,
+rtnetlink) and does not wake up unless there is work.
+SIGINT or SIGTERM sends a shutdown LLDPDU (TTL 0) on every port, prints
+the neighbour tables and statistics, and exits with status 0.
+.SH OPTIONS
+.TP
+.BI \-i " interface" [, interface ...]
+Run LLDP on these interfaces (repeatable, up to 32).
+They must exist at start-up.
+.TP
+.BI \-c " interface"
+Use this interface's MAC address as the chassis ID (default: the first
+.B \-i
+interface).
+.TP
+.BI \-t " seconds"
+msgTxInterval, the transmit interval (1\-3600, default 30).
+.TP
+.BI \-H " hold"
+msgTxHold (1\-100, default 4).
+The advertised TTL is min(65535,
+.IR seconds " \(mu " hold
++ 1).
+.TP
+.BI \-f " count"
+txFastInit: number of LLDPDUs sent one second apart at start-up, on link
+up, and when a new neighbour is detected (0\-8, default 4; 0 disables
+fast transmission).
+.TP
+.BI \-C " credit"
+txCreditMax: maximum number of LLDPDUs sent back-to-back; one more is
+allowed per second (1\-10, default 5).
+.TP
+.BI \-p " seconds"
+Print every neighbour table periodically.
+By default a port's table is printed whenever it changes.
+.TP
+.BI \-n " name"
+System Name (default: the hostname, followed live).
+.TP
+.BI \-d " description"
+System Description (default: uname output).
+.TP
+.BI \-P " description"
+Port Description for every port (default: the interface alias, else
+the interface name).
+.TP
+.B \-M
+Do not send Management Address TLVs.
+.TP
+.BI \-S " path"
+Control socket for
+.BR lldpnd\-ctl (8)
+(default
+.IR /run/lldpnd.sock ;
+.B none
+disables it).
+If the default path cannot be used the daemon continues without it.
+.TP
+.BI \-U " user"
+After opening its sockets, switch to
+.IR user ,
+drop all supplementary groups and every capability except
+.BR CAP_NET_RAW ,
+and set no_new_privs.
+.SH OUTPUT
+Events are logged to standard output, one per line, with a millisecond
+timestamp and the port:
+.PP
+.nf
+.RS
+12:00:01.250 [eth0] NEIGHBOUR ADD chassis=02:00:00:00:00:02 port=eth0(st5) name=sw1 ttl=121
+12:02:03.001 [eth0] NEIGHBOUR AGEOUT chassis=... (TTL expired, last rx 121000 ms ago)
+12:03:00.010 [eth0] rx: discard from 02:00:00:00:00:99: third TLV is not TTL
+.RE
+.fi
+.PP
+Every string received from the network is escaped before it is printed.
+.SH STANDARDS
+IEEE Std 802.1AB-2016, Station and Media Access Control Connectivity
+Discovery.
+.SH SEE ALSO
+.BR lldpnd\-ctl (8),
+.BR packet (7),
+.BR rtnetlink (7)

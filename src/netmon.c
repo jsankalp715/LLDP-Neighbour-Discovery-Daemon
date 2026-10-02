@@ -70,19 +70,32 @@ static void parse_link(const struct nlmsghdr *nh, nm_cb cb, void *ctx)
 		cb(&ev, ctx);
 }
 
+/*
+ * Bounds-checked message walk, used instead of NLMSG_OK/NLMSG_NEXT. Those
+ * macros mix signed and unsigned lengths, and NLMSG_NEXT subtracts the
+ * *aligned* length: with an unsigned counter a final unaligned message
+ * made it wrap and the walk ran past the buffer (found by fuzzing).
+ * Returns the message at off, or NULL if it does not fit entirely.
+ */
+static const struct nlmsghdr *nl_at(const void *buf, size_t len, size_t off)
+{
+	const struct nlmsghdr *nh;
+
+	if (off > len || len - off < sizeof *nh)
+		return NULL;
+	nh = (const struct nlmsghdr *)(const void *)((const unsigned char *)buf + off);
+	if (nh->nlmsg_len < sizeof *nh || nh->nlmsg_len > len - off)
+		return NULL;
+	return nh;
+}
+
 int netmon_parse(const void *buf, size_t len, nm_cb cb, void *ctx)
 {
 	const struct nlmsghdr *nh;
+	size_t off;
 	int n = 0;
-	/*
-	 * Signed on purpose: NLMSG_NEXT subtracts the *aligned* length, which can
-	 * exceed what is left for a final unaligned message. An unsigned counter
-	 * would wrap and NLMSG_OK would then walk past the buffer (found by
-	 * fuzzing); a signed one goes negative and ends the loop.
-	 */
-	int rem = len > 0x7fffffff ? 0x7fffffff : (int)len;
 
-	for (nh = buf; NLMSG_OK(nh, rem); nh = NLMSG_NEXT(nh, rem)) {
+	for (off = 0; (nh = nl_at(buf, len, off)) != NULL; off += NLMSG_ALIGN(nh->nlmsg_len)) {
 		switch (nh->nlmsg_type) {
 		case NLMSG_DONE:
 			return n;
@@ -177,7 +190,7 @@ int netmon_dump_links(nm_cb cb, void *ctx)
 		socklen_t fl = sizeof from;
 		const struct nlmsghdr *nh;
 		ssize_t n = recvfrom(fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
-		int rem;
+		size_t off;
 
 		if (n < 0) {
 			if (errno == EINTR)
@@ -186,8 +199,8 @@ int netmon_dump_links(nm_cb cb, void *ctx)
 		}
 		if (fl < sizeof from || from.nl_pid != 0)
 			continue;
-		rem = (int)n;
-		for (nh = (const struct nlmsghdr *)buf; NLMSG_OK(nh, rem); nh = NLMSG_NEXT(nh, rem))
+		for (off = 0; (nh = nl_at(buf, (size_t)n, off)) != NULL;
+		     off += NLMSG_ALIGN(nh->nlmsg_len))
 			if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR)
 				done = 1;
 		if (netmon_parse(buf, (size_t)n, cb, ctx) < 0)

@@ -1,0 +1,48 @@
+[Unit]
+Description=LLDP (IEEE 802.1AB) neighbour discovery daemon
+Documentation=man:lldpnd(8) man:lldpnd-ctl(8)
+After=network.target
+
+[Service]
+Type=simple
+# set LLDPND_OPTS, at least "-i <interface>[,<interface>...]"
+EnvironmentFile=-/etc/default/lldpnd
+ExecStart=@SBINDIR@/lldpnd -S /run/lldpnd/lldpnd.sock $LLDPND_OPTS
+Restart=on-failure
+RestartSec=2
+
+# Least privilege: a transient unprivileged user that holds CAP_NET_RAW
+# (AF_PACKET sockets) and nothing else.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+RuntimeDirectory=lldpnd
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# Sandboxing. ProtectHostname= is deliberately absent: it would give the
+# service its own UTS namespace and hide hostname changes, which lldpnd
+# advertises live as the System Name.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX AF_INET
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

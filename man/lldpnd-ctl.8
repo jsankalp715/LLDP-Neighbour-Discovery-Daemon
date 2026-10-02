@@ -1,0 +1,50 @@
+.TH LLDPND-CTL 8 "October 2026" "lldpnd" "System Administration"
+.SH NAME
+lldpnd-ctl \- query a running lldpnd
+.SH SYNOPSIS
+.B lldpnd\-ctl
+.RB [ \-S
+.IR path ]
+.RB [ show | json | stats | local | help ]
+.SH DESCRIPTION
+.B lldpnd\-ctl
+connects to the control socket of
+.BR lldpnd (8),
+sends one command, and prints the reply.
+.TP
+.B show
+Neighbour table of every port (default).
+.TP
+.B json
+The complete state as one JSON object: chassis ID, system name and
+description, capabilities, timers, and for each port its statistics and
+neighbours (chassis and port IDs with their subtypes, TTL, time to
+expiry, names, descriptions, capabilities, management addresses).
+Octets received from the network that are not printable ASCII are
+\\u\-escaped, so the output is always valid JSON.
+.TP
+.B stats
+Per-port counters: frames out/in, discarded, in error, unrecognised
+TLVs, ageouts, neighbours dropped because the table was full, and own
+LLDPDUs seen (loops).
+.TP
+.B local
+What this system advertises on each port.
+.TP
+.B help
+List the commands.
+.SH OPTIONS
+.TP
+.BI \-S " path"
+Control socket (default
+.IR /run/lldpnd.sock ;
+the systemd unit uses
+.IR /run/lldpnd/lldpnd.sock ).
+.SH EXAMPLES
+.nf
+lldpnd\-ctl \-S /run/lldpnd/lldpnd.sock json | jq '.ports[].neighbors[].system_name'
+.fi
+.SH EXIT STATUS
+0 on success, 1 if the daemon cannot be reached, 2 on usage errors.
+.SH SEE ALSO
+.BR lldpnd (8)

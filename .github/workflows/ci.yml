@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-unit:
+    name: build + unit tests (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+      - name: Build (-Wall -Wextra -Werror)
+        run: make -j"$(nproc)" CC=${{ matrix.cc }} all
+      - name: Unit tests
+        run: make CC=${{ matrix.cc }} test
+      - name: Unit tests under valgrind
+        if: matrix.cc == 'gcc'
+        run: make CC=${{ matrix.cc }} valgrind
+      - name: Unit tests under ASan + UBSan
+        run: make CC=${{ matrix.cc }} asan
+
+  fuzz:
+    name: fuzzing
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang
+      - name: Fuzz driver (random, mutated, structure-aware) under ASan + UBSan
+        run: make fuzz FUZZ_ITERS=2000000
+      - name: libFuzzer, 60 s
+        run: make libfuzzer FUZZ_SECS=60
+
+  integration:
+    name: raw socket, testbed, lldpd interop, systemd unit (root)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            tcpdump tshark lldpd python3 iproute2 util-linux groff-base
+          # the packaged lldpd would start on the runner's own NIC; we run our own
+          sudo systemctl disable --now lldpd || true
+      - name: Build (plain and ASan)
+        run: make -j"$(nproc)" all && make -j"$(nproc)" asan
+      - name: Raw socket integration test
+        run: sudo make rawsock-test
+      - name: 3-namespace bridge testbed
+        run: sudo make testbed
+      - name: Testbed with daemons under ASan + UBSan
+        run: |
+          sudo env BIN="$PWD/build/asan/lldpnd" CTL="$PWD/build/asan/lldpnd-ctl" \
+            OUT="$PWD/build/testbed-asan" bash scripts/testbed.sh
+          ! grep -lE "Sanitizer|runtime error" build/testbed-asan/*.log
+      - name: Interoperability with lldpd
+        run: sudo make interop
+      - name: systemd unit under real systemd
+        run: sudo bash scripts/service_check.sh
+      - name: Upload captures and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testbed-artifacts
+          path: |
+            build/testbed
+            build/testbed-asan
+            build/interop
+          if-no-files-found: ignore
