@@ -1,0 +1,3 @@
+# Linux-only project: keep LF everywhere, even when checked out on Windows
+* text=auto eol=lf
+*.pcap binary

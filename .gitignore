@@ -1,0 +1,7 @@
+# build output (binaries, objects, sanitizer builds, testbed artifacts, fuzz corpus)
+/build/
+*.o
+*.d
+crash-*
+leak-*
+timeout-*
