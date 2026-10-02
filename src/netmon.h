@@ -27,6 +27,8 @@ struct nm_event {
 	char         ifname[IF_NAMESIZE]; /* "" if absent */
 	int          has_mac;
 	uint8_t      mac[6];
+	int          has_mtu;
+	unsigned     mtu;                 /* IFLA_MTU */
 	int          has_alias;
 	char         alias[256];          /* IFLA_IFALIAS, NUL-terminated */
 };

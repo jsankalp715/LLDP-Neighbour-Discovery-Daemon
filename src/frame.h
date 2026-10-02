@@ -16,8 +16,15 @@
 /* 7.2: LLDP Ethertype */
 #define ETHERTYPE_LLDP   0x88CCu
 
-/* 7.1, Table 7-1: nearest bridge group address, used by this agent */
-extern const uint8_t LLDP_MCAST_NEAREST_BRIDGE[ETH_ADDR_LEN];
+/* 7.1, Table 7-1: the three LLDP group addresses (default: nearest bridge) */
+extern const uint8_t LLDP_MCAST_NEAREST_BRIDGE[ETH_ADDR_LEN];     /* 01-80-C2-00-00-0E */
+extern const uint8_t LLDP_MCAST_NEAREST_NONTPMR[ETH_ADDR_LEN];    /* 01-80-C2-00-00-03 */
+extern const uint8_t LLDP_MCAST_NEAREST_CUSTOMER[ETH_ADDR_LEN];   /* 01-80-C2-00-00-00 */
+
+/* Group address by name ("nearest-bridge", "nearest-nontpmr",
+ * "nearest-customer"), or NULL; and the reverse. */
+const uint8_t *lldp_group_by_name(const char *name);
+const char *lldp_group_name(const uint8_t addr[ETH_ADDR_LEN]);
 
 /* Read-only view of a received Ethernet II frame */
 struct eth_view {

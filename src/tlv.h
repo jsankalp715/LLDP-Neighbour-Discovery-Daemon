@@ -65,6 +65,16 @@ enum lldp_port_subtype {
 #define LLDP_CAP_SVLAN      0x0200u
 #define LLDP_CAP_TPMR       0x0400u
 
+/* Organizationally Specific TLVs (8.6): OUIs of the extensions decoded here */
+#define LLDP_OUI_IEEE_8021  0x0080c2u   /* IEEE 802.1 (802.1Q Annex D) */
+#define LLDP_OUI_IEEE_8023  0x00120fu   /* IEEE 802.3 (802.3 Clause 79) */
+#define LLDP_8021_PORT_VLAN_ID  1u
+#define LLDP_8021_VLAN_NAME     3u
+#define LLDP_8023_MAC_PHY       1u
+#define LLDP_8023_LINK_AGG      3u
+#define LLDP_8023_MAX_FRAME     4u
+#define LLDP_ORG_INFO_MAX       507u    /* 511 - OUI(3) - subtype(1) */
+
 /* Management address subtypes: IANA Address Family Numbers (8.5.9.3) */
 #define LLDP_AF_IPV4        1u
 #define LLDP_AF_IPV6        2u
@@ -117,6 +127,11 @@ int lldp_tlv_put_sys_cap(struct lldp_buf *b, uint16_t supported, uint16_t enable
 int lldp_tlv_put_mgmt_addr(struct lldp_buf *b, uint8_t addr_subtype,
 			   const void *addr, size_t addr_len,
 			   uint8_t if_subtype, uint32_t if_number);
+/* 8.6: OUI (3 octets) | subtype (1) | 0..507 octets of information */
+int lldp_tlv_put_org(struct lldp_buf *b, uint32_t oui, uint8_t subtype,
+		     const void *info, size_t len);
+/* 802.3 Clause 79 Maximum Frame Size TLV */
+int lldp_tlv_put_dot3_mfs(struct lldp_buf *b, uint16_t mfs);
 int lldp_tlv_put_end(struct lldp_buf *b);
 
 /* A decoded TLV; value points into the caller's buffer. */

@@ -27,8 +27,33 @@ struct lldp_mgmt {
 	uint32_t if_number;
 };
 
+/*
+ * Decoded IEEE 802.1 / 802.3 organizationally specific TLVs (8.6). These are
+ * extensions defined outside 802.1AB; a malformed or unknown one is ignored
+ * (counted as unrecognized) rather than discarding the whole LLDPDU.
+ */
+#define LLDP_VLAN_NAME_MAX 32
+struct lldp_ext {
+	int      has_pvid;            /* 802.1 Port VLAN ID */
+	uint16_t pvid;
+	unsigned n_vlan_names;        /* 802.1 VLAN Name TLVs seen; first kept */
+	uint16_t vlan_id;
+	uint8_t  vlan_name_len;
+	uint8_t  vlan_name[LLDP_VLAN_NAME_MAX];
+	int      has_macphy;          /* 802.3 MAC/PHY Configuration/Status */
+	uint8_t  autoneg;             /* bit 0 supported, bit 1 enabled */
+	uint16_t pmd_cap;             /* PMD auto-negotiation advertised capability */
+	uint16_t mau_type;            /* operational MAU type (IANA-MAU-MIB) */
+	int      has_lag;             /* 802.3 Link Aggregation */
+	uint8_t  lag_status;          /* bit 0 capable, bit 1 enabled */
+	uint32_t lag_port_id;
+	int      has_mfs;             /* 802.3 Maximum Frame Size */
+	uint16_t mfs;
+};
+
 /* Information this agent advertises on one port */
 struct lldp_local_info {
+	const uint8_t *dst;                     /* group address (7.1), NULL = nearest bridge */
 	uint8_t     chassis_mac[ETH_ADDR_LEN];  /* chassis ID (subtype 4), per system */
 	uint8_t     port_mac[ETH_ADDR_LEN];     /* Ethernet source address */
 	const char *ifname;                     /* port ID (subtype 5) */
@@ -41,6 +66,7 @@ struct lldp_local_info {
 	uint16_t    sys_cap_enabled;
 	unsigned    n_mgmt;
 	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
+	uint16_t    mfs;                        /* 802.3 Maximum Frame Size, 0 = omit */
 };
 
 /*
@@ -80,8 +106,10 @@ struct lldp_msg {
 	unsigned        n_mgmt_addr;        /* all valid Management Address TLVs */
 	unsigned        n_mgmt;             /* stored in mgmt[], <= LLDP_MAX_MGMT */
 	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
-	unsigned        n_org_tlvs;
-	unsigned        n_unknown_tlvs;     /* reserved types 9..126 */
+	unsigned        n_org_tlvs;         /* all Organizationally Specific TLVs */
+	unsigned        n_unknown_tlvs;     /* reserved types 9..126, and org TLVs
+					       not decoded (unknown or malformed) */
+	struct lldp_ext ext;
 };
 
 enum lldp_parse_err {
@@ -128,6 +156,9 @@ const char *lldp_cap_name(unsigned bit);
 
 /* Management address as "192.0.2.1" / "2001:db8::1" / "mac 02:..", else hex */
 void lldp_mgmt_format(const struct lldp_mgmt *m, char *out, size_t cap);
+
+/* 1 if two decoded extension sets carry the same information */
+int lldp_ext_equal(const struct lldp_ext *a, const struct lldp_ext *b);
 
 /* Buffer sizes sufficient for the formatters above */
 #define LLDP_ESC_MAX     (4 * 255 + 1)

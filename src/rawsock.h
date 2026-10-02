@@ -15,15 +15,16 @@ struct lldp_sock {
 	int     fd;
 	int     ifindex;
 	uint8_t mac[ETH_ADDR_LEN];
+	uint8_t group[ETH_ADDR_LEN];    /* LLDP destination group address */
 	char    ifname[IF_NAMESIZE];
 };
 
 /*
  * Open a non-blocking AF_PACKET/SOCK_RAW socket that receives only frames
- * with EtherType 0x88CC on ifname, joined to the LLDP nearest-bridge group
- * address. Returns 0 or -1 (errno set; message printed to stderr).
+ * with EtherType 0x88CC on ifname, joined to the given LLDP group address
+ * (NULL = nearest bridge). Returns 0 or -1 (errno set; message on stderr).
  */
-int lldp_sock_open(struct lldp_sock *s, const char *ifname);
+int lldp_sock_open(struct lldp_sock *s, const char *ifname, const uint8_t *group);
 
 /* Transmit a complete Ethernet frame. Returns 0 or -1. */
 int lldp_sock_send(struct lldp_sock *s, const uint8_t *frame, size_t len);

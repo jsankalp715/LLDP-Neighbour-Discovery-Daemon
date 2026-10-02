@@ -4,7 +4,7 @@ inject_lldp.py - send hand-crafted (mostly malformed) LLDP frames onto an
 interface, to check that a running lldpnd rejects each one for the right
 reason. Used by testbed.sh. Needs CAP_NET_RAW.
 
-    inject_lldp.py <ifname> <src-mac>
+    inject_lldp.py <ifname> <src-mac> [malformed|extensions]
 
 Prints one line per frame: "<expected daemon log substring>".
 """
@@ -38,10 +38,31 @@ def ttl(s):
 END = tlv(0, b"")
 
 
+def org(oui, subtype, info):
+    """Organizationally Specific TLV (8.6)."""
+    return tlv(127, bytes.fromhex(oui) + bytes([subtype]) + info)
+
+
+def extensions(src):
+    """A valid LLDPDU carrying the 802.1/802.3 extensions lldpnd decodes."""
+    return (chassis(src) + port(b"ext0") + ttl(120) + tlv(5, b"ext-host")
+            + org("0080c2", 1, struct.pack("!H", 100))                      # PVID 100
+            + org("0080c2", 3, struct.pack("!HB", 100, 5) + b"voice")       # VLAN name
+            + org("00120f", 1, bytes([0x03]) + struct.pack("!HH", 0x6c01, 16))  # MAC/PHY
+            + org("00120f", 3, bytes([0x03]) + struct.pack("!I", 7))        # link aggr.
+            + org("00120f", 4, struct.pack("!H", 1522))                     # MFS
+            + END)
+
+
 def main():
     ifname, src = sys.argv[1], bytes.fromhex(sys.argv[2].replace(":", ""))
+    mode = sys.argv[3] if len(sys.argv) > 3 else "malformed"
     s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
     s.bind((ifname, 0))
+    if mode == "extensions":
+        s.send(DST + src + ETYPE + extensions(src))
+        print("NEIGHBOUR ADD chassis=" + src.hex(":") + " port=ext0(st5) name=ext-host")
+        return
 
     # (expected log text, LLDPDU)
     cases = [

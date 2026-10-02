@@ -23,6 +23,10 @@ static void usage(const char *prog)
 		"usage: %s -i <interface>[,<interface>...] [options]\n"
 		"  -i IF[,IF]  interface(s) to run LLDP on; repeatable (required)\n"
 		"  -c IF       interface whose MAC is the chassis ID (default: first -i)\n"
+		"  -m MODE     adminStatus: rxtx (default), tx (transmit only),\n"
+		"              rx (receive only)\n"
+		"  -a ADDR     destination group address: nearest-bridge (default),\n"
+		"              nearest-nontpmr, nearest-customer\n"
 		"  -t SECS     msgTxInterval, transmit interval (1-3600, default %d)\n"
 		"  -H N        msgTxHold, hold multiplier (1-100, default %d);\n"
 		"              advertised TTL = min(65535, SECS * N + 1)\n"
@@ -93,8 +97,28 @@ int main(int argc, char **argv)
 	cfg.fast_init = TXS_DEFAULT_FAST_INIT;
 	cfg.credit_max = TXS_DEFAULT_CREDIT_MAX;
 
-	while ((c = getopt(argc, argv, "i:c:t:H:f:C:p:n:d:P:MS:U:h")) != -1) {
+	while ((c = getopt(argc, argv, "i:c:m:a:t:H:f:C:p:n:d:P:MS:U:h")) != -1) {
 		switch (c) {
+		case 'm':
+			if (strcmp(optarg, "rxtx") == 0)
+				cfg.admin = ADMIN_RXTX;
+			else if (strcmp(optarg, "tx") == 0)
+				cfg.admin = ADMIN_TX_ONLY;
+			else if (strcmp(optarg, "rx") == 0)
+				cfg.admin = ADMIN_RX_ONLY;
+			else {
+				fprintf(stderr, "invalid -m %s (rxtx, tx or rx)\n", optarg);
+				return 2;
+			}
+			break;
+		case 'a':
+			cfg.group = lldp_group_by_name(optarg);
+			if (!cfg.group) {
+				fprintf(stderr, "invalid -a %s (nearest-bridge, nearest-nontpmr, "
+					"nearest-customer)\n", optarg);
+				return 2;
+			}
+			break;
 		case 'i':
 			if (add_ifnames(&cfg, optarg) < 0)
 				return 2;

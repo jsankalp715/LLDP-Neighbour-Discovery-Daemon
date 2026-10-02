@@ -71,6 +71,48 @@ static int mgmt_same(const struct lldp_msg *a, const struct lldp_msg *b)
 	return 1;
 }
 
+/* Re-encode decoded extensions (only the first VLAN name is kept). */
+static void ext_put(struct lldp_buf *b, const struct lldp_ext *x)
+{
+	uint8_t v[3 + LLDP_VLAN_NAME_MAX];
+
+	if (x->has_pvid) {
+		v[0] = (uint8_t)(x->pvid >> 8); v[1] = (uint8_t)x->pvid;
+		lldp_tlv_put_org(b, LLDP_OUI_IEEE_8021, LLDP_8021_PORT_VLAN_ID, v, 2);
+	}
+	if (x->n_vlan_names) {
+		v[0] = (uint8_t)(x->vlan_id >> 8); v[1] = (uint8_t)x->vlan_id;
+		v[2] = x->vlan_name_len;
+		memcpy(v + 3, x->vlan_name, x->vlan_name_len);
+		lldp_tlv_put_org(b, LLDP_OUI_IEEE_8021, LLDP_8021_VLAN_NAME, v,
+				 3u + x->vlan_name_len);
+	}
+	if (x->has_macphy) {
+		v[0] = x->autoneg;
+		v[1] = (uint8_t)(x->pmd_cap >> 8); v[2] = (uint8_t)x->pmd_cap;
+		v[3] = (uint8_t)(x->mau_type >> 8); v[4] = (uint8_t)x->mau_type;
+		lldp_tlv_put_org(b, LLDP_OUI_IEEE_8023, LLDP_8023_MAC_PHY, v, 5);
+	}
+	if (x->has_lag) {
+		v[0] = x->lag_status;
+		v[1] = (uint8_t)(x->lag_port_id >> 24); v[2] = (uint8_t)(x->lag_port_id >> 16);
+		v[3] = (uint8_t)(x->lag_port_id >> 8);  v[4] = (uint8_t)x->lag_port_id;
+		lldp_tlv_put_org(b, LLDP_OUI_IEEE_8023, LLDP_8023_LINK_AGG, v, 5);
+	}
+	if (x->has_mfs)
+		lldp_tlv_put_dot3_mfs(b, x->mfs);
+}
+
+/* equal, except that only one VLAN Name TLV was re-encoded */
+static int ext_same(const struct lldp_ext *orig, const struct lldp_ext *again)
+{
+	struct lldp_ext o = *orig;
+
+	if (o.n_vlan_names > 1)
+		o.n_vlan_names = 1;
+	return lldp_ext_equal(&o, again);
+}
+
 /* Invariant: what we accepted, we can re-encode, and it decodes the same. */
 static void roundtrip(const struct lldp_msg *m)
 {
@@ -91,6 +133,7 @@ static void roundtrip(const struct lldp_msg *m)
 		lldp_tlv_put_mgmt_addr(&b, m->mgmt[i].subtype, m->mgmt[i].addr,
 				       m->mgmt[i].len, m->mgmt[i].if_subtype,
 				       m->mgmt[i].if_number);
+	ext_put(&b, &m->ext);
 	lldp_tlv_put_end(&b);
 	if (b.err) {
 		fprintf(stderr, "roundtrip: accepted message cannot be re-encoded\n");
@@ -105,7 +148,7 @@ static void roundtrip(const struct lldp_msg *m)
 	    m->has_sys_cap != fz_msg2.has_sys_cap ||
 	    (m->has_sys_cap && (m->sys_cap != fz_msg2.sys_cap ||
 				m->sys_cap_enabled != fz_msg2.sys_cap_enabled)) ||
-	    !mgmt_same(m, &fz_msg2)) {
+	    !mgmt_same(m, &fz_msg2) || !ext_same(&m->ext, &fz_msg2.ext)) {
 		fprintf(stderr, "roundtrip: mismatch (rc=%d)\n", rc);
 		abort();
 	}
@@ -250,6 +293,10 @@ static void make_seeds(void)
 	lldp_tlv_put(&b, 7, "\x00\x14\x00\x04", 4);
 	lldp_tlv_put(&b, 8, "\x05\x01\x0a\x00\x00\x01\x02\x00\x00\x00\x03\x00", 12);
 	lldp_tlv_put(&b, 127, "\x00\x80\xc2\x01\x00\x01", 6);
+	lldp_tlv_put(&b, 127, "\x00\x80\xc2\x03\x00\x64\x05voice", 12);
+	lldp_tlv_put(&b, 127, "\x00\x12\x0f\x01\x03\x6c\x01\x00\x10", 9);
+	lldp_tlv_put(&b, 127, "\x00\x12\x0f\x03\x03\x00\x00\x00\x07", 9);
+	lldp_tlv_put_dot3_mfs(&b, 1518);
 	lldp_tlv_put(&b, 42, "unknown", 7);
 	lldp_tlv_put_sys_name(&b, "all-tlvs");
 	lldp_tlv_put_end(&b);
@@ -340,6 +387,15 @@ static size_t structured(uint8_t *buf, size_t cap)
 		unsigned l = rn(4) ? rn(16) : rn(512);
 		for (j = 0; j < l; j++) val[j] = (uint8_t)rnd();
 		if (t == 8 && l > 0) val[0] = (uint8_t)rn(40);
+		if (t == 127 && l >= 4 && rn(4)) {     /* aim at the decoded extensions */
+			static const uint8_t ouis[2][3] = { { 0x00, 0x80, 0xc2 },
+							    { 0x00, 0x12, 0x0f } };
+			static const uint8_t subs[] = { 1, 3, 4 };
+			memcpy(val, ouis[rn(2)], 3);
+			val[3] = subs[rn(sizeof subs)];
+			if (l >= 7 && rn(2))
+				val[6] = (uint8_t)(l - 7);    /* consistent VLAN name length */
+		}
 		lldp_tlv_put(&b, t, val, l);
 	}
 	if (rn(4)) lldp_tlv_put_end(&b);

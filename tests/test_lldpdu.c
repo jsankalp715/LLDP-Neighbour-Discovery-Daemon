@@ -385,6 +385,93 @@ static void test_caps_and_mgmt(void)
 	CHECK(m.mgmt[0].if_number == 3);
 }
 
+static void test_extensions(void)
+{
+	struct pdu p;
+	struct lldp_msg m;
+	struct lldp_ext a, b;
+	uint8_t vn[4 + 3 + 33];
+	uint8_t buf[1500];
+	ssize_t n;
+
+	/* all five decoded extensions in one LLDPDU */
+	memset(&p, 0, sizeof p); mandatory(&p);
+	raw(&p, 127, 6, "\x00\x80\xc2\x01\x00\x64");                     /* PVID 100 */
+	raw(&p, 127, 12, "\x00\x80\xc2\x03\x00\x64\x05voice");           /* VLAN 100 "voice" */
+	raw(&p, 127, 10, "\x00\x80\xc2\x03\x00\xc8\x03" "dat");          /* 2nd name, counted */
+	raw(&p, 127, 9, "\x00\x12\x0f\x01\x03\x6c\x01\x00\x10");         /* MAC/PHY */
+	raw(&p, 127, 9, "\x00\x12\x0f\x03\x03\x00\x00\x00\x07");         /* LAG */
+	raw(&p, 127, 6, "\x00\x12\x0f\x04\x05\xf2");                     /* MFS 1522 */
+	end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK);
+	CHECK(m.n_org_tlvs == 6 && m.n_unknown_tlvs == 0);
+	CHECK(m.ext.has_pvid && m.ext.pvid == 100);
+	CHECK(m.ext.n_vlan_names == 2 && m.ext.vlan_id == 100 && m.ext.vlan_name_len == 5);
+	CHECK_MEM(m.ext.vlan_name, "voice", 5);
+	CHECK(m.ext.has_macphy && m.ext.autoneg == 3 && m.ext.pmd_cap == 0x6c01 &&
+	      m.ext.mau_type == 16);
+	CHECK(m.ext.has_lag && m.ext.lag_status == 3 && m.ext.lag_port_id == 7);
+	CHECK(m.ext.has_mfs && m.ext.mfs == 1522);
+
+	/* malformed, unknown and repeated extensions are ignored, never fatal */
+	memset(&p, 0, sizeof p); mandatory(&p);
+	raw(&p, 127, 5, "\x00\x80\xc2\x01\x00");                         /* PVID too short */
+	raw(&p, 127, 7, "\x00\x12\x0f\x04\x05\xf2\x00");                 /* MFS too long */
+	raw(&p, 127, 8, "\x00\x80\xc2\x03\x00\x01\x00x");                /* VLAN name len 0 */
+	raw(&p, 127, 9, "\x00\x80\xc2\x03\x00\x01\x05" "ab");            /* name len lies */
+	raw(&p, 127, 8, "\x00\x12\x0f\x01\x03\x00\x00\x00");             /* MAC/PHY short */
+	raw(&p, 127, 6, "\x00\x12\x0f\x63\x00\x00");                     /* unknown subtype */
+	raw(&p, 127, 6, "\xaa\xbb\xcc\x01\x00\x00");                     /* unknown OUI */
+	raw(&p, 127, 6, "\x00\x12\x0f\x04\x05\xdc");                     /* MFS 1500 */
+	raw(&p, 127, 6, "\x00\x12\x0f\x04\x23\x28");                     /* 2nd MFS ignored */
+	end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK);
+	CHECK(m.n_org_tlvs == 9 && m.n_unknown_tlvs == 8);
+	CHECK(!m.ext.has_pvid && m.ext.n_vlan_names == 0 && !m.ext.has_macphy);
+	CHECK(m.ext.has_mfs && m.ext.mfs == 1500);
+
+	/* VLAN name boundaries: 32 octets accepted, 33 not */
+	memcpy(vn, "\x00\x80\xc2\x03\x00\x0a", 6);
+	vn[6] = 32;
+	memset(vn + 7, 'n', 33);
+	memset(&p, 0, sizeof p); mandatory(&p); raw(&p, 127, 7 + 32, vn); end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK && m.ext.vlan_name_len == 32);
+	vn[6] = 33;
+	memset(&p, 0, sizeof p); mandatory(&p); raw(&p, 127, 7 + 33, vn); end(&p);
+	CHECK(lldpdu_parse(p.b, p.n, &m) == LLDP_OK && m.ext.n_vlan_names == 0 &&
+	      m.n_unknown_tlvs == 1);
+
+	/* builder: Maximum Frame Size is sent, not in a shutdown LLDPDU */
+	{
+		struct lldp_local_info li = {
+			.chassis_mac = { 2, 0, 0, 0, 0, 1 }, .port_mac = { 2, 0, 0, 0, 0, 1 },
+			.ifname = "eth0", .ttl = 120, .mfs = 9018,
+		};
+		n = lldpdu_build(&li, buf, sizeof buf);
+		CHECK(lldpdu_parse(buf, (size_t)n, &m) == LLDP_OK);
+		CHECK(m.ext.has_mfs && m.ext.mfs == 9018 && m.n_org_tlvs == 1);
+		li.ttl = 0;
+		n = lldpdu_build(&li, buf, sizeof buf);
+		CHECK(lldpdu_parse(buf, (size_t)n, &m) == LLDP_OK && !m.ext.has_mfs);
+	}
+
+	/* equality ignores absent fields, sees every present one */
+	memset(&a, 0, sizeof a);
+	memset(&b, 0xff, sizeof b);
+	b.has_pvid = b.n_vlan_names = b.has_macphy = b.has_lag = b.has_mfs = 0;
+	CHECK(lldp_ext_equal(&a, &b));
+	a.has_mfs = b.has_mfs = 1; a.mfs = 1518; b.mfs = 1518;
+	CHECK(lldp_ext_equal(&a, &b));
+	b.mfs = 1522;
+	CHECK(!lldp_ext_equal(&a, &b));
+	b.mfs = 1518; a.n_vlan_names = b.n_vlan_names = 1;
+	a.vlan_name_len = b.vlan_name_len = 2; a.vlan_id = b.vlan_id = 5;
+	memcpy(a.vlan_name, "ab", 2); memcpy(b.vlan_name, "ab", 2);
+	CHECK(lldp_ext_equal(&a, &b));
+	b.vlan_name[1] = 'c';
+	CHECK(!lldp_ext_equal(&a, &b));
+}
+
 static void test_names(void)
 {
 	char out[LLDP_CAPFMT_MAX];
@@ -419,5 +506,6 @@ int main(void)
 	RUN(test_strerror_and_format);
 	RUN(test_caps_and_mgmt);
 	RUN(test_names);
+	RUN(test_extensions);
 	return test_report("test_lldpdu");
 }

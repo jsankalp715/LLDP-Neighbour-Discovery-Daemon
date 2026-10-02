@@ -231,6 +231,44 @@ static void test_caps_mgmt_changes(void)
 	free(buf);
 }
 
+static void test_ext_changes(void)
+{
+	struct lldp_msg m = msg(3, "eth0", 10);
+	char *buf = NULL;
+	size_t len = 0;
+	FILE *f;
+
+	neigh_init(&tbl);
+	m.ext.has_pvid = 1;
+	m.ext.pvid = 100;
+	m.ext.n_vlan_names = 1;
+	m.ext.vlan_id = 100;
+	m.ext.vlan_name_len = 6;
+	memcpy(m.ext.vlan_name, "vo\x1bice", 6);       /* escaped on output */
+	m.ext.has_macphy = 1;
+	m.ext.autoneg = 3;
+	m.ext.mau_type = 30;
+	m.ext.has_mfs = 1;
+	m.ext.mfs = 1518;
+	CHECK(neigh_update(&tbl, &m, SRC, 0, NULL) == NEIGH_ADDED);
+	CHECK(neigh_update(&tbl, &m, SRC, 1, NULL) == NEIGH_REFRESHED);
+	m.ext.mfs = 9018;                              /* MTU change on the peer */
+	CHECK(neigh_update(&tbl, &m, SRC, 2, NULL) == NEIGH_UPDATED);
+	m.ext.pvid = 200;                              /* moved to another VLAN */
+	CHECK(neigh_update(&tbl, &m, SRC, 3, NULL) == NEIGH_UPDATED);
+
+	f = open_memstream(&buf, &len);
+	if (!f)
+		return;
+	neigh_print(&tbl, "eth0", 3, f);
+	fclose(f);
+	CHECK(strstr(buf, "vlan         pvid 200, vlan 100 name \"vo\\x1bice\"") != NULL);
+	CHECK(strstr(buf, "mac/phy      autoneg supported/enabled, pmd-cap 0x0000, mau type 30") != NULL);
+	CHECK(strstr(buf, "max frame    9018") != NULL);
+	CHECK(strchr(buf, 0x1b) == NULL);
+	free(buf);
+}
+
 static unsigned flushed;
 static void flush_cb(const struct neigh *n, void *ctx)
 {
@@ -259,6 +297,7 @@ int main(void)
 {
 	RUN(test_caps_mgmt_changes);
 	RUN(test_flush);
+	RUN(test_ext_changes);
 	RUN(test_add_refresh_update);
 	RUN(test_keying);
 	RUN(test_ageing);

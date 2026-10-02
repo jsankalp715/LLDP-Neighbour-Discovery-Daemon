@@ -88,6 +88,7 @@ enum neigh_result neigh_update(struct neigh_table *t, const struct lldp_msg *m,
 			   n->sys_cap == m->sys_cap &&
 			   n->sys_cap_enabled == m->sys_cap_enabled &&
 			   mgmt_eq(n, m) &&
+			   lldp_ext_equal(&n->ext, &m->ext) &&
 			   memcmp(n->src_mac, src_mac, ETH_ADDR_LEN) == 0;
 		res = same ? NEIGH_REFRESHED : NEIGH_UPDATED;
 	} else {
@@ -120,6 +121,7 @@ enum neigh_result neigh_update(struct neigh_table *t, const struct lldp_msg *m,
 	memcpy(n->mgmt, m->mgmt, sizeof n->mgmt);
 	n->n_org_tlvs = m->n_org_tlvs;
 	n->n_unknown_tlvs = m->n_unknown_tlvs;
+	n->ext = m->ext;
 	n->rx_count++;
 	if (out)
 		*out = n;
@@ -182,6 +184,35 @@ static void print_str(FILE *f, const char *label, const struct lldp_str *s)
 	fprintf(f, "    %-12s %s\n", label, esc);
 }
 
+static void print_ext(FILE *f, const struct lldp_ext *x)
+{
+	char esc[LLDP_ESC_MAX];
+
+	if (x->has_pvid || x->n_vlan_names) {
+		fprintf(f, "    %-12s", "vlan");
+		if (x->has_pvid)
+			fprintf(f, " pvid %u", x->pvid);
+		if (x->n_vlan_names) {
+			lldp_escape(x->vlan_name, x->vlan_name_len, esc, sizeof esc);
+			fprintf(f, "%s vlan %u name \"%s\"", x->has_pvid ? "," : "",
+				x->vlan_id, esc);
+			if (x->n_vlan_names > 1)
+				fprintf(f, " (+%u more)", x->n_vlan_names - 1);
+		}
+		fputc('\n', f);
+	}
+	if (x->has_macphy)
+		fprintf(f, "    %-12s autoneg %s/%s, pmd-cap 0x%04x, mau type %u\n", "mac/phy",
+			x->autoneg & 1 ? "supported" : "unsupported",
+			x->autoneg & 2 ? "enabled" : "disabled", x->pmd_cap, x->mau_type);
+	if (x->has_lag)
+		fprintf(f, "    %-12s %s/%s, port id %u\n", "aggregation",
+			x->lag_status & 1 ? "capable" : "not capable",
+			x->lag_status & 2 ? "enabled" : "disabled", x->lag_port_id);
+	if (x->has_mfs)
+		fprintf(f, "    %-12s %u\n", "max frame", x->mfs);
+}
+
 void neigh_print(const struct neigh_table *t, const char *label, uint64_t now_ms, FILE *f)
 {
 	char cid[LLDP_IDFMT_MAX], pid[LLDP_IDFMT_MAX], mac[18];
@@ -218,6 +249,7 @@ void neigh_print(const struct neigh_table *t, const char *label, uint64_t now_ms
 				n->mgmt[j].if_subtype == LLDP_IFNUM_SYSPORT ? "port" : "?",
 				n->mgmt[j].if_number);
 		}
+		print_ext(f, &n->ext);
 		if (n->n_org_tlvs || n->n_unknown_tlvs)
 			fprintf(f, "    %-12s %u org-specific, %u unrecognised\n", "other TLVs",
 				n->n_org_tlvs, n->n_unknown_tlvs);

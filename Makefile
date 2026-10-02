@@ -9,6 +9,7 @@
 #   make rawsock-test  raw socket integration test   (root; private netns)
 #   make testbed       3-namespace bridge testbed     (root)
 #   make interop       interoperability test vs lldpd (root; needs lldpd)
+#   make modes-test    adminStatus, group addresses, VLANs, MFS, extensions (root)
 #   make check         test + valgrind + asan + fuzz (no root needed)
 #   make install       install binaries, man pages, systemd unit
 #                      (PREFIX=/usr/local, DESTDIR=)
@@ -45,7 +46,7 @@ UNITDIR ?= /lib/systemd/system
 
 .SECONDARY:
 
-.PHONY: all test asan valgrind fuzz libfuzzer rawsock-test testbed interop \
+.PHONY: all test asan valgrind fuzz libfuzzer rawsock-test testbed interop modes-test \
         check install uninstall clean
 
 all: $(BUILD)/lldpnd $(BUILD)/lldpnd-ctl $(UNIT_BIN) $(BUILD)/test_rawsock \
@@ -115,6 +116,10 @@ testbed: $(BUILD)/lldpnd $(BUILD)/lldpnd-ctl
 interop: $(BUILD)/lldpnd $(BUILD)/lldpnd-ctl
 	BIN=$(abspath $(BUILD)/lldpnd) CTL=$(abspath $(BUILD)/lldpnd-ctl) \
 	    bash scripts/interop_lldpd.sh
+
+modes-test: $(BUILD)/lldpnd $(BUILD)/lldpnd-ctl
+	BIN=$(abspath $(BUILD)/lldpnd) CTL=$(abspath $(BUILD)/lldpnd-ctl) \
+	    bash scripts/modes_test.sh
 
 check: all test valgrind asan fuzz
 

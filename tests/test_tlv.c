@@ -118,6 +118,37 @@ static void test_sys_cap_and_mgmt_builders(void)
 	CHECK(lldp_tlv_put_mgmt_addr(&b, 99, NULL, 4, 1, 0) == -1);
 }
 
+static void test_org_builders(void)
+{
+	uint8_t mem[600], info[508];
+	struct lldp_buf b;
+	static const uint8_t expect[] = {
+		/* org TLV: type 127, len 6 -> 0xfe06; 802.3 OUI 00-12-0F, MFS (4), 1518 */
+		0xfe, 0x06, 0x00, 0x12, 0x0f, 0x04, 0x05, 0xee,
+		/* 802.1 OUI 00-80-C2, Port VLAN ID (1), PVID 100 */
+		0xfe, 0x06, 0x00, 0x80, 0xc2, 0x01, 0x00, 0x64,
+	};
+
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_dot3_mfs(&b, 1518) == 0);
+	CHECK(lldp_tlv_put_org(&b, LLDP_OUI_IEEE_8021, LLDP_8021_PORT_VLAN_ID, "\x00\x64", 2) == 0);
+	CHECK(b.err == 0 && b.len == sizeof expect);
+	CHECK_MEM(mem, expect, sizeof expect);
+
+	memset(info, 0x5a, sizeof info);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_org(&b, 0xabcdef, 9, info, 507) == 0);  /* TLV len 511 */
+	CHECK(mem[0] == 0xff && mem[1] == 0xff);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_org(&b, 0xabcdef, 9, info, 508) == -1);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_org(&b, 0x1000000, 1, NULL, 0) == -1); /* OUI is 24 bits */
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_org(&b, 1, 1, NULL, 1) == -1);
+	lldp_buf_init(&b, mem, sizeof mem);
+	CHECK(lldp_tlv_put_org(&b, 1, 1, NULL, 0) == 0 && b.len == 6);
+}
+
 static void test_builder_limits(void)
 {
 	uint8_t mem[600];
@@ -232,6 +263,7 @@ int main(void)
 	RUN(test_hdr_overflow);
 	RUN(test_builders);
 	RUN(test_sys_cap_and_mgmt_builders);
+	RUN(test_org_builders);
 	RUN(test_builder_limits);
 	RUN(test_iter_roundtrip);
 	RUN(test_iter_malformed);

@@ -37,6 +37,7 @@ struct neigh {
 	struct lldp_mgmt mgmt[LLDP_MAX_MGMT];
 	unsigned        n_org_tlvs;
 	unsigned        n_unknown_tlvs;
+	struct lldp_ext ext;              /* decoded 802.1 / 802.3 extensions */
 	uint32_t        rx_count;
 };
 

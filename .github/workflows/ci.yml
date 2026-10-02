@@ -71,6 +71,8 @@ jobs:
           ! grep -h "==[0-9]*==" build/testbed-valgrind/ns*.log
       - name: Interoperability with lldpd
         run: sudo make interop
+      - name: adminStatus, group addresses, VLAN, MFS, extensions
+        run: sudo make modes-test
       - name: systemd unit under real systemd
         run: sudo bash scripts/service_check.sh
       - name: Upload captures and logs
@@ -83,4 +85,5 @@ jobs:
             build/testbed-asan
             build/testbed-valgrind
             build/interop
+            build/modes
           if-no-files-found: ignore

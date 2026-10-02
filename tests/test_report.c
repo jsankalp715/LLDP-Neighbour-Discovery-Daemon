@@ -47,6 +47,17 @@ static struct lldp_msg hostile(void)
 	m.mgmt[0] = (struct lldp_mgmt){ LLDP_AF_IPV4, 4, { 192, 0, 2, 9 }, 2, 3 };
 	m.mgmt[1] = (struct lldp_mgmt){ 77, 3, { '"', '\\', 0 }, 1, 0xffffffffu };
 	m.n_org_tlvs = 3;
+	m.ext.has_pvid = 1;
+	m.ext.pvid = 4094;
+	m.ext.n_vlan_names = 2;
+	m.ext.vlan_id = 7;
+	m.ext.vlan_name_len = 4;
+	memcpy(m.ext.vlan_name, "v\"\x00\xfe", 4);
+	m.ext.has_lag = 1;
+	m.ext.lag_status = 1;
+	m.ext.lag_port_id = 42;
+	m.ext.has_mfs = 1;
+	m.ext.mfs = 65535;
 	return m;
 }
 
@@ -116,7 +127,12 @@ static void test_json_valid_and_escaped(void)
 	CHECK(strstr(s, "\"name\":\"eth1\",\"ifindex\":0,\"present\":false") != NULL);
 	CHECK(strstr(s, "\"neighbors\":[]") != NULL);
 	CHECK(strstr(s, "\"frames_in\":7") != NULL);
-	/* pure ASCII, no raw control characters except the final newline */
+	CHECK(strstr(s, "\"admin_status\":\"rxtx\",\"destination\":{\"name\":\"nearest-bridge\","
+			"\"mac\":\"01:80:c2:00:00:0e\"}") != NULL);
+	CHECK(strstr(s, "\"ieee8021\":{\"port_vlan_id\":4094,\"vlan_name\":{\"vlan_id\":7,"
+			"\"name\":\"v\\\"\\u0000\\u00fe\",\"count\":2}}") != NULL);
+	CHECK(strstr(s, "\"ieee8023\":{\"mac_phy\":null,\"link_aggregation\":{\"capable\":true,"
+			"\"enabled\":false,\"port_id\":42},\"max_frame_size\":65535}") != NULL);	/* pure ASCII, no raw control characters except the final newline */
 	for (size_t i = 0; i + 1 < len; i++)
 		if ((unsigned char)s[i] < 0x20 || (unsigned char)s[i] >= 0x7f) {
 			CHECK(!"raw control/non-ASCII octet in JSON");

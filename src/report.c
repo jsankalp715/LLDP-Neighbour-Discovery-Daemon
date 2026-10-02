@@ -101,6 +101,48 @@ static const char *family_name(uint8_t af)
 	}
 }
 
+static const char *jbool(int v)
+{
+	return v ? "true" : "false";
+}
+
+/* decoded 802.1 / 802.3 extensions; absent ones are null */
+static void json_ext(FILE *out, const struct lldp_ext *x)
+{
+	fputs("\"ieee8021\":{\"port_vlan_id\":", out);
+	if (x->has_pvid)
+		fprintf(out, "%u", x->pvid);
+	else
+		fputs("null", out);
+	fputs(",\"vlan_name\":", out);
+	if (x->n_vlan_names) {
+		fprintf(out, "{\"vlan_id\":%u,\"name\":", x->vlan_id);
+		json_str(out, x->vlan_name, x->vlan_name_len);
+		fprintf(out, ",\"count\":%u}", x->n_vlan_names);
+	} else {
+		fputs("null", out);
+	}
+	fputs("},\"ieee8023\":{\"mac_phy\":", out);
+	if (x->has_macphy)
+		fprintf(out, "{\"autoneg_supported\":%s,\"autoneg_enabled\":%s,"
+			"\"pmd_capability\":%u,\"mau_type\":%u}",
+			jbool(x->autoneg & 1), jbool(x->autoneg & 2), x->pmd_cap, x->mau_type);
+	else
+		fputs("null", out);
+	fputs(",\"link_aggregation\":", out);
+	if (x->has_lag)
+		fprintf(out, "{\"capable\":%s,\"enabled\":%s,\"port_id\":%u}",
+			jbool(x->lag_status & 1), jbool(x->lag_status & 2), x->lag_port_id);
+	else
+		fputs("null", out);
+	fputs(",\"max_frame_size\":", out);
+	if (x->has_mfs)
+		fprintf(out, "%u", x->mfs);
+	else
+		fputs("null", out);
+	fputc('}', out);
+}
+
 void report_neigh_json(const struct neigh *n, uint64_t now_ms, FILE *out)
 {
 	char mac[18], addr[LLDP_MGMTFMT_MAX];
@@ -139,8 +181,10 @@ void report_neigh_json(const struct neigh *n, uint64_t now_ms, FILE *out)
 		fprintf(out, ",\"if_subtype\":%u,\"if_number\":%u}",
 			n->mgmt[i].if_subtype, n->mgmt[i].if_number);
 	}
-	fprintf(out, "],\"org_specific_tlvs\":%u,\"unrecognized_tlvs\":%u}",
+	fprintf(out, "],\"org_specific_tlvs\":%u,\"unrecognized_tlvs\":%u,",
 		n->n_org_tlvs, n->n_unknown_tlvs);
+	json_ext(out, &n->ext);
+	fputc('}', out);
 }
 
 static void json_stats(FILE *out, const struct port_stats *st)
@@ -168,9 +212,12 @@ void report_json(const struct agent *ag, FILE *out)
 	json_caps(out, ag->caps);
 	fputs(",\"enabled\":", out);
 	json_caps(out, ag->caps_enabled);
-	fprintf(out, "},\"tx_interval\":%u,\"tx_hold\":%u,\"ttl\":%u,\"uptime_ms\":%llu,"
-		"\"ports\":[", ag->cfg.tx_interval, ag->cfg.tx_hold, ag->ttl,
-		(unsigned long long)(now - ag->start_ms));
+	eth_ntoa(agent_group(ag), mac);
+	fprintf(out, "},\"admin_status\":\"%s\",\"destination\":{\"name\":\"%s\",\"mac\":\"%s\"},"
+		"\"tx_interval\":%u,\"tx_hold\":%u,\"ttl\":%u,\"uptime_ms\":%llu,"
+		"\"ports\":[", agent_admin_name(ag->cfg.admin),
+		lldp_group_name(agent_group(ag)), mac, ag->cfg.tx_interval,
+		ag->cfg.tx_hold, ag->ttl, (unsigned long long)(now - ag->start_ms));
 	for (i = 0; i < ag->nports; i++) {
 		const struct port *p = ag->ports[i];
 		int first = 1;
@@ -179,8 +226,8 @@ void report_json(const struct agent *ag, FILE *out)
 		fprintf(out, "%s{\"name\":", i ? "," : "");
 		json_cstr(out, p->name);
 		fprintf(out, ",\"ifindex\":%d,\"present\":%s,\"link_up\":%s,\"mac\":\"%s\","
-			"\"stats\":", p->ifindex, p->ifindex > 0 ? "true" : "false",
-			p->oper_up ? "true" : "false", mac);
+			"\"mtu\":%u,\"stats\":", p->ifindex, p->ifindex > 0 ? "true" : "false",
+			p->oper_up ? "true" : "false", mac, p->mtu);
 		json_stats(out, &p->st);
 		fputs(",\"neighbors\":[", out);
 		for (j = 0; j < NEIGH_MAX; j++) {
@@ -237,6 +284,9 @@ void report_local(const struct agent *ag, FILE *out)
 	fprintf(out, "system name  %s\n", ag->cfg.sys_name ? ag->cfg.sys_name : ag->hostname);
 	fprintf(out, "system desc  %s\n", ag->cfg.sys_desc ? ag->cfg.sys_desc : ag->sysdesc);
 	fprintf(out, "capabilities %s (enabled: %s)\n", caps, en);
+	eth_ntoa(agent_group(ag), mac);
+	fprintf(out, "mode         %s, destination %s (%s)\n",
+		agent_admin_name(ag->cfg.admin), lldp_group_name(agent_group(ag)), mac);
 	fprintf(out, "timers       tx-interval %us, hold %u, ttl %us, fast-init %u, credit-max %u\n",
 		ag->cfg.tx_interval, ag->cfg.tx_hold, ag->ttl, ag->cfg.fast_init,
 		ag->cfg.credit_max);

@@ -40,6 +40,25 @@
 #include "privdrop.h"
 #include "report.h"
 
+const char *agent_admin_name(enum admin_status a)
+{
+	switch (a) {
+	case ADMIN_TX_ONLY: return "tx";
+	case ADMIN_RX_ONLY: return "rx";
+	case ADMIN_RXTX:    break;
+	}
+	return "rxtx";
+}
+
+const uint8_t *agent_group(const struct agent *ag)
+{
+	return ag->cfg.group ? ag->cfg.group : LLDP_MCAST_NEAREST_BRIDGE;
+}
+
+/* adminStatus (9.2.5.1) gates each direction */
+static int tx_enabled(const struct agent *ag) { return ag->cfg.admin != ADMIN_RX_ONLY; }
+static int rx_enabled(const struct agent *ag) { return ag->cfg.admin != ADMIN_TX_ONLY; }
+
 uint64_t agent_now_ms(void)
 {
 	struct timespec ts;
@@ -90,7 +109,7 @@ static void drain(int fd)
 
 static void port_arm_tx(struct port *p, uint64_t now)
 {
-	if (p->sock.fd >= 0 && p->oper_up)
+	if (p->sock.fd >= 0 && p->oper_up && tx_enabled(p->ag))
 		timer_at(p->tx_tfd, txs_deadline(&p->txs, now));
 	else
 		timer_at(p->tx_tfd, 0);
@@ -122,6 +141,10 @@ void agent_local_info(const struct agent *ag, const struct port *p,
 	memcpy(li->port_mac, p->mac, ETH_ADDR_LEN);
 	li->ifname = p->name;
 	li->ttl = ag->ttl;
+	li->dst = agent_group(ag);
+	/* 802.3 Maximum Frame Size: MTU + Ethernet header (14) + FCS (4) */
+	if (p->mtu)
+		li->mfs = (uint16_t)(p->mtu + 18 > 65535 ? 65535 : p->mtu + 18);
 
 	/* 8.5.5: Port Description = ifAlias by default, like ifDescr/ifAlias in IF-MIB */
 	if (ag->cfg.port_desc)
@@ -322,7 +345,7 @@ static int port_attach(struct port *p)
 	struct agent *ag = p->ag;
 	char mac[18];
 
-	if (lldp_sock_open(&p->sock, p->name) < 0)
+	if (lldp_sock_open(&p->sock, p->name, agent_group(ag)) < 0)
 		return -1;
 	p->ifindex = p->sock.ifindex;
 	memcpy(p->mac, p->sock.mac, ETH_ADDR_LEN);
@@ -374,7 +397,8 @@ static void port_handle_frame(struct port *p, const uint8_t *buf, size_t len, in
 	eth_ntoa(v.src, src);
 	/* belt and braces: the socket is bound to 0x88CC, verify anyway (7.2) */
 	if (v.ethertype != ETHERTYPE_LLDP ||
-	    memcmp(v.dst, LLDP_MCAST_NEAREST_BRIDGE, ETH_ADDR_LEN) != 0) {
+	    memcmp(v.dst, agent_group(ag), ETH_ADDR_LEN) != 0) {
+		/* another group address belongs to another agent (7.1) */
 		p->st.frames_discarded++;
 		logmsg(p->name, "rx: discard from %s: not LLDP / wrong destination", src);
 		return;
@@ -457,8 +481,11 @@ static void port_rx(struct port *p)
 		}
 		if (outgoing)
 			continue;          /* our own transmissions */
-		/* 9.2.9: nothing is received until portEnabled (drain and drop) */
-		if (!p->oper_up)
+		/*
+		 * 9.2.9: nothing is received until portEnabled, nor when
+		 * adminStatus is enabledTxOnly (drain and drop)
+		 */
+		if (!p->oper_up || !rx_enabled(p->ag))
 			continue;
 		port_handle_frame(p, buf, (size_t)n, truncated);
 	}
@@ -480,7 +507,7 @@ static void port_tx_timer(struct port *p)
 	struct agent *ag = p->ag;
 	uint64_t now = agent_now_ms();
 
-	if (p->sock.fd < 0 || !p->oper_up)
+	if (p->sock.fd < 0 || !p->oper_up || !tx_enabled(ag))
 		return;
 	/* cheap re-check of local information (catches sysctl changes too) */
 	if (refresh_system(ag))
@@ -499,7 +526,8 @@ static void send_shutdown(struct port *p)
 	char pd[sizeof p->alias];
 	ssize_t n;
 
-	if (p->sock.fd < 0 || !p->oper_up)
+	/* an rx-only agent never transmitted, so it has nothing to withdraw */
+	if (p->sock.fd < 0 || !p->oper_up || !tx_enabled(p->ag))
 		return;
 	agent_local_info(p->ag, p, &li, pd, sizeof pd);
 	li.ttl = 0;                     /* 9.2.7 mibConstrShutdownLLDPDU() */
@@ -571,6 +599,8 @@ static void on_netmon(const struct nm_event *ev, void *ctx)
 		eth_ntoa(p->mac, mac);
 		logmsg(p->name, "MAC address changed to %s", mac);
 	}
+	if (ev->has_mtu)
+		p->mtu = ev->mtu;
 	snprintf(p->alias, sizeof p->alias, "%s", ev->has_alias ? ev->alias : "");
 	port_set_oper(p, is_oper_up(ev->flags));
 }
@@ -736,9 +766,10 @@ int agent_run(struct agent *ag)
 	int n, k;
 
 	eth_ntoa(ag->chassis_mac, mac);
-	logmsg(NULL, "lldpnd started: chassis=%s ports=%u tx-interval=%us ttl=%us "
-	       "fast-init=%u credit-max=%u", mac, ag->nports, ag->cfg.tx_interval,
-	       ag->ttl, ag->cfg.fast_init, ag->cfg.credit_max);
+	logmsg(NULL, "lldpnd started: chassis=%s ports=%u mode=%s dest=%s tx-interval=%us "
+	       "ttl=%us fast-init=%u credit-max=%u", mac, ag->nports,
+	       agent_admin_name(ag->cfg.admin), lldp_group_name(agent_group(ag)),
+	       ag->cfg.tx_interval, ag->ttl, ag->cfg.fast_init, ag->cfg.credit_max);
 	ag->running = 1;
 
 	while (ag->running) {
