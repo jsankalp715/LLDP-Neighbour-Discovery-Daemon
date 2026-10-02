@@ -273,7 +273,7 @@ after that the bridge is configured with `group_fwd_mask 0x4000`.
 | 1 | all 10 adjacencies are learned (ns1 is seen on both ports with one chassis ID); ns1 reports a loop on both ports |
 | 2 | `lldpnd-ctl json` from each daemon parses and shows names, alias-derived port descriptions, capabilities and management addresses; `show`, `stats`, `local` and unknown commands behave correctly |
 | 3 | 10 malformed frames are each rejected with the right reason; a valid frame with a reserved and an org-specific TLV is accepted, then deleted by its TTL 0 |
-| 4 | an alias change, a hostname change (via `nsenter`) and a new IPv6 address each reach ns1 in 20–30 ms (a periodic frame would take up to 2000 ms) |
+| 4 | an alias change, a hostname change (via `nsenter`) and a new IPv6 address each reach ns1 in 20–30 ms (a periodic frame would take up to 2000 ms); turning on IP forwarding switches the advertised capability to router at the next periodic check |
 | 5 | ns2 runs as uid 65534 with `CapEff` = `0x2000` (CAP_NET_RAW) |
 | 6 | link flap: flush on down, re-learn about 1 s after up |
 | 7 | ns2's interface is deleted and recreated; the unprivileged daemon re-attaches and re-learns |
@@ -310,9 +310,9 @@ Final run on 2026-10-03, from `make clean`, in WSL2:
 | Fuzz driver under ASan+UBSan, 3M (default seed) + 10M (seed `0xdeadbeef`) | no crashes or sanitizer reports; round-trip and JSON-validity invariants held for every accepted frame |
 | libFuzzer + ASan+UBSan, 121 s | 22.5M executions (~186k/s), 383 edges, 523-input corpus, no crashes |
 | Raw-socket test, plain and ASan | **27/27** each |
-| Testbed, plain | **76/76** |
-| Testbed, daemons under ASan+UBSan | **76/76**, no sanitizer output |
-| Testbed, daemons under valgrind | **76/76**, no valgrind output |
+| Testbed, plain | **77/77** |
+| Testbed, daemons under ASan+UBSan | **77/77**, no sanitizer output |
+| Testbed, daemons under valgrind | **77/77**, no valgrind output |
 | Interop with lldpd 1.0.18 | **29/29** |
 | systemd unit under real systemd | **14/14**; `systemd-analyze security` exposure 1.9 (OK) |
 | Idle steady state, `-t 5`, 20 s | 4 wake-ups (one per frame), 0 ms CPU, in `do_epoll_wait` |
@@ -344,6 +344,11 @@ Final run on 2026-10-03, from `make clean`, in WSL2:
    * lldpd's privilege-separated child needs its socket directory to be traversable.
    * valgrind's gdbserver FIFOs can't be removed after the daemon drops privileges
      (fixed with `--vgdb=no`).
+   * Found by the first CI run: a new network namespace inherits IPv4 forwarding
+     from the host, and GitHub runners have it on (Docker). The daemons correctly
+     advertised router, but the tests assumed station. The tests now pin forwarding
+     off per namespace, and a new check confirms that turning it on switches the
+     advertised capability to router.
 5. **Wireshark 4.2.2 display quirk, not a defect.** On LLDP frames longer than 60
    octets, Wireshark shows the last 3 octets as an Ethernet "trailer". Frames built
    independently in Python show the same thing, and every TLV still decodes with no

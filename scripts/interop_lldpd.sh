@@ -109,6 +109,11 @@ chmod 755 "$WORK"    # lldpd's privilege-separated child (_lldpd) must reach its
 echo "== interop: lldpnd vs $(lldpd -v 2>&1 | head -1 | sed 's/^/lldpd /')"
 
 ip netns add $A; ip netns add $B
+# a new netns inherits IPv4 forwarding from the host (on where Docker runs);
+# both implementations derive the router capability from it, so pin it off
+for n in $A $B; do
+	ip netns exec $n sysctl -qw net.ipv4.conf.all.forwarding=0 net.ipv6.conf.all.forwarding=0
+done
 ip -n $A link add eth0 address $MAC_A type veth peer name eth0 netns $B address $MAC_B
 ip -n $A addr add 192.0.2.1/24 dev eth0; ip -n $A addr add 2001:db8::1/64 dev eth0 nodad
 ip -n $B addr add 192.0.2.2/24 dev eth0; ip -n $B addr add 2001:db8::2/64 dev eth0 nodad

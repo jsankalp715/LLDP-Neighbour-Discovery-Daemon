@@ -151,6 +151,11 @@ ip -n $BRNS link add br0 type bridge stp_state 0
 ip -n $BRNS link set br0 up
 for i in 1 2 3; do
 	ip netns add lldp-ns$i
+	# A new netns inherits IPv4 forwarding from the host (on wherever Docker
+	# runs, e.g. CI runners), and forwarding decides whether the router
+	# capability is enabled. Start from a known state: plain hosts.
+	ip netns exec lldp-ns$i sysctl -qw net.ipv4.conf.all.forwarding=0 \
+		net.ipv6.conf.all.forwarding=0
 	ip -n lldp-ns$i link set lo up
 	mkveth lldp-ns$i eth0 "$(mac $i)" brp$i "ns$i uplink to br0"
 	ip -n lldp-ns$i addr add 192.0.2.$i/24 dev eth0
@@ -251,6 +256,14 @@ change "ns2 hostname change" "nb eth0 $(mac 2) eth0 name=ns2-renamed" \
 	nsenter -t "${PID[ns2]}" -u hostname ns2-renamed
 change "ns3 new IPv6 address" "mgmt=192.0.2.3,2001:db8::3" \
 	ip -n lldp-ns3 addr add 2001:db8::3/64 dev eth0 nodad
+# no event exists for a sysctl change: it is picked up at the next periodic check
+t=$(mono_ms)
+ip netns exec lldp-ns3 sysctl -qw net.ipv4.conf.all.forwarding=1
+if wait_fact 1 $((TX + 2)) "nb eth0 $(mac 3) eth0 name=ns3 pdesc=ns3 renamed uplink caps=router"; then
+	ok "ns3 enabling IP forwarding -> router capability seen by ns1 after $(( $(mono_ms) - t )) ms"
+else
+	bad "ns3's router capability did not reach ns1"
+fi
 check "ns3 logged somethingChangedLocal" grep -qF "local information changed" "$(log 3)"
 check "ns2 logged its new system name" grep -qF "system name changed: ns2 -> ns2-renamed" "$(log 2)"
 
