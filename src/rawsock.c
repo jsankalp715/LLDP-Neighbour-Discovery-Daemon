@@ -17,7 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-int lldp_sock_open(struct lldp_sock *s, const char *ifname)
+int lldp_sock_open(struct lldp_sock *s, const char *ifname, const uint8_t *group)
 {
 	struct sockaddr_ll sll;
 	struct packet_mreq mr;
@@ -25,6 +25,7 @@ int lldp_sock_open(struct lldp_sock *s, const char *ifname)
 	int saved;
 
 	memset(s, 0, sizeof *s);
+	memcpy(s->group, group ? group : LLDP_MCAST_NEAREST_BRIDGE, ETH_ADDR_LEN);
 	s->fd = -1;
 
 	if (strlen(ifname) >= sizeof s->ifname) {
@@ -76,7 +77,7 @@ int lldp_sock_open(struct lldp_sock *s, const char *ifname)
 	mr.mr_ifindex = s->ifindex;
 	mr.mr_type    = PACKET_MR_MULTICAST;
 	mr.mr_alen    = ETH_ADDR_LEN;
-	memcpy(mr.mr_address, LLDP_MCAST_NEAREST_BRIDGE, ETH_ADDR_LEN);
+	memcpy(mr.mr_address, s->group, ETH_ADDR_LEN);
 	if (setsockopt(s->fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr) < 0) {
 		fprintf(stderr, "PACKET_ADD_MEMBERSHIP(%s): %s\n", ifname, strerror(errno));
 		goto fail;
@@ -101,7 +102,7 @@ int lldp_sock_send(struct lldp_sock *s, const uint8_t *frame, size_t len)
 	sll.sll_protocol = htons(ETHERTYPE_LLDP);
 	sll.sll_ifindex  = s->ifindex;
 	sll.sll_halen    = ETH_ADDR_LEN;
-	memcpy(sll.sll_addr, LLDP_MCAST_NEAREST_BRIDGE, ETH_ADDR_LEN);
+	memcpy(sll.sll_addr, s->group, ETH_ADDR_LEN);
 
 	n = sendto(s->fd, frame, len, 0, (struct sockaddr *)&sll, sizeof sll);
 	if (n < 0)

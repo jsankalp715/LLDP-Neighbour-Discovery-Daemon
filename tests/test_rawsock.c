@@ -53,7 +53,7 @@ static int send_any(int ifindex, const uint8_t *frame, size_t len)
 }
 
 /* is the LLDP group address in the device's multicast list? */
-static int mcast_joined(const char *ifname)
+static int mcast_joined(const char *ifname, const char *group_hex)
 {
 	char line[256], name[64], addr[64];
 	int idx, users, global, found = 0;
@@ -63,7 +63,7 @@ static int mcast_joined(const char *ifname)
 		return 0;
 	while (fgets(line, sizeof line, f))
 		if (sscanf(line, "%d %63s %d %d %63s", &idx, name, &users, &global, addr) == 5 &&
-		    strcmp(name, ifname) == 0 && strcmp(addr, "0180c200000e") == 0)
+		    strcmp(name, ifname) == 0 && strcmp(addr, group_hex) == 0)
 			found = 1;
 	fclose(f);
 	return found;
@@ -88,12 +88,12 @@ int main(int argc, char **argv)
 	}
 
 	/* open errors */
-	CHECK(lldp_sock_open(&bad, "does-not-exist0") == -1);
-	CHECK(lldp_sock_open(&bad, "lo") == -1);           /* not Ethernet */
+	CHECK(lldp_sock_open(&bad, "does-not-exist0", NULL) == -1);
+	CHECK(lldp_sock_open(&bad, "lo", NULL) == -1);           /* not Ethernet */
 	CHECK(bad.fd == -1);
 
-	CHECK(lldp_sock_open(&a, argv[1]) == 0);
-	CHECK(lldp_sock_open(&b, argv[2]) == 0);
+	CHECK(lldp_sock_open(&a, argv[1], NULL) == 0);
+	CHECK(lldp_sock_open(&b, argv[2], NULL) == 0);
 	if (t_failures)
 		return test_report("test_rawsock");
 
@@ -105,8 +105,8 @@ int main(int argc, char **argv)
 	CHECK(a.ifindex > 0 && b.ifindex > 0 && a.ifindex != b.ifindex);
 
 	/* PACKET_ADD_MEMBERSHIP programmed the device multicast list */
-	CHECK(mcast_joined(argv[1]));
-	CHECK(mcast_joined(argv[2]));
+	CHECK(mcast_joined(argv[1], "0180c200000e"));
+	CHECK(mcast_joined(argv[2], "0180c200000e"));
 
 	/* 1. LLDP frame A -> B arrives byte-identical and parses */
 	memcpy(li.chassis_mac, a.mac, 6);
@@ -166,6 +166,29 @@ int main(int argc, char **argv)
 		n = recv_wait(&a, rx, sizeof rx, 1000, &trunc, &outg);
 	} while (n > 0 && outg);
 	CHECK(n == flen && memcmp(rx, tx, (size_t)flen) == 0);
+
+	/* 6. another LLDP group address (7.1): joined and used as destination */
+	{
+		struct lldp_sock c;
+		struct eth_view cv;
+		CHECK(!mcast_joined(argv[1], "0180c2000003"));
+		CHECK(lldp_sock_open(&c, argv[1], LLDP_MCAST_NEAREST_NONTPMR) == 0);
+		CHECK(mcast_joined(argv[1], "0180c2000003"));
+		li.dst = LLDP_MCAST_NEAREST_NONTPMR;
+		memcpy(li.port_mac, c.mac, 6);
+		flen = lldp_frame_build(&li, tx, sizeof tx);
+		CHECK(lldp_sock_send(&c, tx, (size_t)flen) == 0);
+		do {
+			n = recv_wait(&b, rx, sizeof rx, 1000, &trunc, &outg);
+		} while (n > 0 && outg);
+		CHECK(n == flen && eth_frame_parse(rx, (size_t)n, &cv) == 0);
+		CHECK(n == flen && memcmp(cv.dst, LLDP_MCAST_NEAREST_NONTPMR, 6) == 0);
+		lldp_sock_close(&c);
+		li.dst = NULL;
+		CHECK(strcmp(lldp_group_name(LLDP_MCAST_NEAREST_CUSTOMER), "nearest-customer") == 0);
+		CHECK(lldp_group_by_name("nearest-nontpmr") == LLDP_MCAST_NEAREST_NONTPMR);
+		CHECK(lldp_group_by_name("bogus") == NULL);
+	}
 
 	/* nothing pending returns 0, not an error */
 	while (lldp_sock_recv(&b, rx, sizeof rx, &trunc, &outg) > 0)

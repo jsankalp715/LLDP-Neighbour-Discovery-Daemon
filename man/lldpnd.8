@@ -7,6 +7,10 @@ lldpnd \- LLDP (IEEE 802.1AB) neighbour discovery daemon
 .IR interface [, interface ...]
 .RB [ \-c
 .IR interface ]
+.RB [ \-m
+.BR rxtx | tx | rx ]
+.RB [ \-a
+.IR group ]
 .RB [ \-t
 .IR seconds ]
 .RB [ \-H
@@ -41,8 +45,19 @@ time-to-live expires or when it sends a shutdown LLDPDU.
 Advertised TLVs: Chassis ID (MAC address of the chassis interface, the
 same on every port), Port ID (interface name), TTL, Port Description,
 System Name, System Description, System Capabilities, Management Address
-(the interface's first IPv4 and IPv6 address, else its MAC) and End Of
-LLDPDU.
+(the interface's first IPv4 and IPv6 address, else its MAC), the IEEE
+802.3 Maximum Frame Size (MTU + 18) and End Of LLDPDU.
+.PP
+Of the organizationally specific TLVs received, these IEEE 802.1 and 802.3
+extensions are decoded and shown: Port VLAN ID, VLAN Name, MAC/PHY
+Configuration/Status, Link Aggregation and Maximum Frame Size.
+Unknown or malformed extensions are counted and ignored; they never cause
+an LLDPDU to be discarded.
+.PP
+VLAN sub-interfaces (for example
+.IR eth0.100 )
+can be used like any other interface; their LLDPDUs are tagged on the
+wire.
 .PP
 Received LLDPDUs are validated strictly and discarded if malformed:
 TLV lengths that run past the frame, missing or misordered mandatory
@@ -78,6 +93,27 @@ They must exist at start-up.
 Use this interface's MAC address as the chassis ID (default: the first
 .B \-i
 interface).
+.TP
+.BR \-m " rxtx" | tx | rx
+adminStatus: transmit and receive (default), transmit only, or receive
+only.
+A transmit-only agent ignores every received LLDPDU; a receive-only agent
+never transmits, not even a shutdown LLDPDU.
+.TP
+.BI \-a " group"
+Destination group address:
+.B nearest\-bridge
+(01:80:C2:00:00:0E, default; never forwarded by any bridge),
+.B nearest\-nontpmr
+(01:80:C2:00:00:03; passes two-port MAC relays) or
+.B nearest\-customer
+(01:80:C2:00:00:00; also passes provider bridges).
+LLDPDUs sent to another group address are ignored: they belong to another
+agent.
+To run several agents on one port, start one
+.B lldpnd
+per address, each with its own
+.BR \-S .
 .TP
 .BI \-t " seconds"
 msgTxInterval, the transmit interval (1\-3600, default 30).

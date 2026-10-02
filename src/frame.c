@@ -12,9 +12,49 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/*
+ * 7.1, Table 7-1. Each address reaches a different scope: nearest bridge is
+ * never forwarded by any bridge; nearest non-TPMR bridge passes two-port MAC
+ * relays; nearest customer bridge also passes provider bridges.
+ */
 const uint8_t LLDP_MCAST_NEAREST_BRIDGE[ETH_ADDR_LEN] = {
 	0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e
 };
+const uint8_t LLDP_MCAST_NEAREST_NONTPMR[ETH_ADDR_LEN] = {
+	0x01, 0x80, 0xc2, 0x00, 0x00, 0x03
+};
+const uint8_t LLDP_MCAST_NEAREST_CUSTOMER[ETH_ADDR_LEN] = {
+	0x01, 0x80, 0xc2, 0x00, 0x00, 0x00
+};
+
+static const struct {
+	const char    *name;
+	const uint8_t *addr;
+} groups[] = {
+	{ "nearest-bridge",   LLDP_MCAST_NEAREST_BRIDGE },
+	{ "nearest-nontpmr",  LLDP_MCAST_NEAREST_NONTPMR },
+	{ "nearest-customer", LLDP_MCAST_NEAREST_CUSTOMER },
+};
+
+const uint8_t *lldp_group_by_name(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof groups / sizeof groups[0]; i++)
+		if (strcmp(name, groups[i].name) == 0)
+			return groups[i].addr;
+	return NULL;
+}
+
+const char *lldp_group_name(const uint8_t addr[ETH_ADDR_LEN])
+{
+	size_t i;
+
+	for (i = 0; i < sizeof groups / sizeof groups[0]; i++)
+		if (memcmp(addr, groups[i].addr, ETH_ADDR_LEN) == 0)
+			return groups[i].name;
+	return "non-standard";
+}
 
 ssize_t eth_frame_build(uint8_t *out, size_t cap,
 			const uint8_t dst[ETH_ADDR_LEN],

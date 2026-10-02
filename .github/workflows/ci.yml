@@ -71,8 +71,13 @@ jobs:
           ! grep -h "==[0-9]*==" build/testbed-valgrind/ns*.log
       - name: Interoperability with lldpd
         run: sudo make interop
+      - name: adminStatus, group addresses, VLAN, MFS, extensions
+        run: sudo make modes-test
       - name: systemd unit under real systemd
         run: sudo bash scripts/service_check.sh
+      - name: Make artifacts readable (the tests ran as root)
+        if: always()
+        run: sudo chmod -R a+rX build || true
       - name: Upload captures and logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -83,4 +88,5 @@ jobs:
             build/testbed-asan
             build/testbed-valgrind
             build/interop
+            build/modes
           if-no-files-found: ignore

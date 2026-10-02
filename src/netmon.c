@@ -57,6 +57,14 @@ static void parse_link(const struct nlmsghdr *nh, nm_cb cb, void *ctx)
 				ev.has_mac = 1;
 			}
 			break;
+		case IFLA_MTU:
+			if (plen == sizeof(uint32_t)) {
+				uint32_t mtu;
+				memcpy(&mtu, RTA_DATA(rta), sizeof mtu);
+				ev.mtu = mtu;
+				ev.has_mtu = 1;
+			}
+			break;
 		case IFLA_IFALIAS:
 			ev.has_alias = 1;
 			if (plen >= sizeof ev.alias)

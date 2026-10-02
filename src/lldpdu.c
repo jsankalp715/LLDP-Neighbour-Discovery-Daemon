@@ -41,6 +41,9 @@ ssize_t lldpdu_build(const struct lldp_local_info *li, uint8_t *out, size_t cap)
 			lldp_tlv_put_mgmt_addr(&b, li->mgmt[i].subtype, li->mgmt[i].addr,
 					       li->mgmt[i].len, li->mgmt[i].if_subtype,
 					       li->mgmt[i].if_number);
+		/* 8.6 / 802.3 Clause 79: lets the peer spot an MTU mismatch */
+		if (li->mfs)
+			lldp_tlv_put_dot3_mfs(&b, li->mfs);
 	}
 	lldp_tlv_put_end(&b);
 	if (b.err)
@@ -55,8 +58,8 @@ ssize_t lldp_frame_build(const struct lldp_local_info *li, uint8_t *out, size_t 
 
 	if (n < 0)
 		return -1;
-	return eth_frame_build(out, cap, LLDP_MCAST_NEAREST_BRIDGE, li->port_mac,
-			       ETHERTYPE_LLDP, pdu, (size_t)n);
+	return eth_frame_build(out, cap, li->dst ? li->dst : LLDP_MCAST_NEAREST_BRIDGE,
+			       li->port_mac, ETHERTYPE_LLDP, pdu, (size_t)n);
 }
 
 static const char *const errstr[LLDP_E_COUNT] = {
@@ -157,6 +160,89 @@ static int decode_mgmt_addr(const struct lldp_tlv *t, struct lldp_mgmt *out)
 	return 0;
 }
 
+static uint16_t be16(const uint8_t *p)
+{
+	return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+/*
+ * Decode the IEEE 802.1 and 802.3 extensions most equipment sends. Each has
+ * a fixed or self-describing length; anything unknown, malformed, or a
+ * repeat of a single-instance extension returns -1 and is ignored (counted
+ * as unrecognized) - an optional extension never invalidates the LLDPDU.
+ */
+static int decode_org(const struct lldp_tlv *t, struct lldp_ext *x)
+{
+	uint32_t oui = ((uint32_t)t->value[0] << 16) | ((uint32_t)t->value[1] << 8) |
+		       t->value[2];
+	uint8_t subtype = t->value[3];
+	const uint8_t *v = t->value + 4;
+	unsigned n = t->len - 4;
+
+	if (oui == LLDP_OUI_IEEE_8021) {
+		switch (subtype) {
+		case LLDP_8021_PORT_VLAN_ID:           /* 802.1Q D.2.1: PVID, 2 octets */
+			if (n != 2 || x->has_pvid)
+				return -1;
+			x->has_pvid = 1;
+			x->pvid = be16(v);
+			return 0;
+		case LLDP_8021_VLAN_NAME:              /* D.2.3: VID, len, 1..32 name */
+			if (n < 4 || v[2] < 1 || v[2] > LLDP_VLAN_NAME_MAX ||
+			    n != 3u + v[2])
+				return -1;
+			if (x->n_vlan_names++ == 0) {
+				x->vlan_id = be16(v);
+				x->vlan_name_len = v[2];
+				memcpy(x->vlan_name, v + 3, v[2]);
+			}
+			return 0;
+		}
+	} else if (oui == LLDP_OUI_IEEE_8023) {
+		switch (subtype) {
+		case LLDP_8023_MAC_PHY:                /* 79.3.1: 1 + 2 + 2 octets */
+			if (n != 5 || x->has_macphy)
+				return -1;
+			x->has_macphy = 1;
+			x->autoneg = v[0] & 0x03;
+			x->pmd_cap = be16(v + 1);
+			x->mau_type = be16(v + 3);
+			return 0;
+		case LLDP_8023_LINK_AGG:               /* 79.3.3: status + port id */
+			if (n != 5 || x->has_lag)
+				return -1;
+			x->has_lag = 1;
+			x->lag_status = v[0] & 0x03;
+			x->lag_port_id = ((uint32_t)v[1] << 24) | ((uint32_t)v[2] << 16) |
+					 ((uint32_t)v[3] << 8) | v[4];
+			return 0;
+		case LLDP_8023_MAX_FRAME:              /* 79.3.4: 2 octets */
+			if (n != 2 || x->has_mfs)
+				return -1;
+			x->has_mfs = 1;
+			x->mfs = be16(v);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+int lldp_ext_equal(const struct lldp_ext *a, const struct lldp_ext *b)
+{
+	return a->has_pvid == b->has_pvid && (!a->has_pvid || a->pvid == b->pvid) &&
+	       a->n_vlan_names == b->n_vlan_names &&
+	       (!a->n_vlan_names || (a->vlan_id == b->vlan_id &&
+				     a->vlan_name_len == b->vlan_name_len &&
+				     memcmp(a->vlan_name, b->vlan_name, a->vlan_name_len) == 0)) &&
+	       a->has_macphy == b->has_macphy &&
+	       (!a->has_macphy || (a->autoneg == b->autoneg && a->pmd_cap == b->pmd_cap &&
+				   a->mau_type == b->mau_type)) &&
+	       a->has_lag == b->has_lag &&
+	       (!a->has_lag || (a->lag_status == b->lag_status &&
+				a->lag_port_id == b->lag_port_id)) &&
+	       a->has_mfs == b->has_mfs && (!a->has_mfs || a->mfs == b->mfs);
+}
+
 int lldpdu_parse(const uint8_t *pdu, size_t len, struct lldp_msg *m)
 {
 	struct lldp_tlv_iter it;
@@ -255,6 +341,8 @@ int lldpdu_parse(const uint8_t *pdu, size_t len, struct lldp_msg *m)
 			if (t.len < 4)
 				return LLDP_E_BAD_LENGTH;
 			m->n_org_tlvs++;
+			if (decode_org(&t, &m->ext) < 0)
+				m->n_unknown_tlvs++;
 			break;
 
 		default:

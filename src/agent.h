@@ -18,7 +18,16 @@
 #define AGENT_MAX_PORTS      32
 #define AGENT_REINIT_DELAY_MS 2000u   /* reinitDelay default, 9.2.5.10 */
 
+/* adminStatus (9.2.5.1) */
+enum admin_status {
+	ADMIN_RXTX,        /* enabledRxTx (default) */
+	ADMIN_TX_ONLY,     /* enabledTxOnly */
+	ADMIN_RX_ONLY,     /* enabledRxOnly */
+};
+
 struct agent_cfg {
+	enum admin_status admin;
+	const uint8_t *group;        /* destination group address (7.1), NULL = nearest bridge */
 	const char *ifnames[AGENT_MAX_PORTS];
 	unsigned    n_ifnames;
 	const char *chassis_if;      /* interface whose MAC is the chassis ID */
@@ -64,6 +73,7 @@ struct port {
 	int               ifindex;             /* 0 while the interface is absent */
 	int               oper_up;             /* portEnabled (9.2.5) */
 	uint8_t           mac[ETH_ADDR_LEN];
+	unsigned          mtu;                 /* 0 = unknown */
 	char              alias[256];
 	struct lldp_sock  sock;                /* fd -1 when closed */
 	int               tx_tfd, age_tfd;
@@ -96,6 +106,11 @@ struct agent {
 };
 
 uint64_t agent_now_ms(void);
+
+/* adminStatus as text: "rxtx", "tx", "rx" */
+const char *agent_admin_name(enum admin_status a);
+/* the destination group address in use */
+const uint8_t *agent_group(const struct agent *ag);
 
 /* Validate config and open everything. Returns 0, or -1 (message printed). */
 int  agent_init(struct agent *ag, const struct agent_cfg *cfg);

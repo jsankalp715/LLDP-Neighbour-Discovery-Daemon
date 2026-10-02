@@ -171,6 +171,31 @@ int lldp_tlv_put_mgmt_addr(struct lldp_buf *b, uint8_t addr_subtype,
 	return lldp_tlv_put(b, LLDP_TLV_MGMT_ADDR, v, n);
 }
 
+int lldp_tlv_put_org(struct lldp_buf *b, uint32_t oui, uint8_t subtype,
+		     const void *info, size_t len)
+{
+	uint8_t v[4 + LLDP_ORG_INFO_MAX];
+
+	if (oui > 0xffffffu || len > LLDP_ORG_INFO_MAX || (len > 0 && info == NULL)) {
+		b->err = 1;
+		return -1;
+	}
+	v[0] = (uint8_t)(oui >> 16);
+	v[1] = (uint8_t)(oui >> 8);
+	v[2] = (uint8_t)oui;
+	v[3] = subtype;
+	if (len > 0)
+		memcpy(v + 4, info, len);
+	return lldp_tlv_put(b, LLDP_TLV_ORG_SPECIFIC, v, 4 + len);
+}
+
+/* 802.3 Clause 79.3.4: maximum frame size the MAC/PHY supports, 2 octets */
+int lldp_tlv_put_dot3_mfs(struct lldp_buf *b, uint16_t mfs)
+{
+	uint8_t v[2] = { (uint8_t)(mfs >> 8), (uint8_t)mfs };
+	return lldp_tlv_put_org(b, LLDP_OUI_IEEE_8023, LLDP_8023_MAX_FRAME, v, sizeof v);
+}
+
 /* 8.5.1 End Of LLDPDU: type 0, length 0 */
 int lldp_tlv_put_end(struct lldp_buf *b)
 {

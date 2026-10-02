@@ -59,6 +59,13 @@ for p in d["ports"]:
         for m in n["management_addresses"]:
             print("mgmt=%s/%s/if%d" % (m["family"], m["address"], m["if_number"]))
         print("org_tlvs=%d" % n["org_specific_tlvs"])
+        e3 = n["ieee8023"]
+        mp, la = e3["mac_phy"], e3["link_aggregation"]
+        if mp:
+            print("macphy=autoneg:%s/%s mau:%d" % (mp["autoneg_supported"],
+                                                   mp["autoneg_enabled"], mp["mau_type"]))
+        if la:
+            print("lag=capable:%s enabled:%s" % (la["capable"], la["enabled"]))
 EOF
 }
 # wait_view <timeout-s> <lldpd|lldpnd> <fixed-string>
@@ -148,6 +155,7 @@ check "management address IPv4"      v "chassis.mgmt-ip=192.0.2.1"
 check "management address IPv6"      v "chassis.mgmt-ip=2001:db8::1"
 check "capability Router supported, disabled" v "chassis.Router.enabled=off"
 check "capability Station supported, enabled" v "chassis.Station.enabled=on"
+check "802.3 maximum frame size (MTU 1500 + 18)" v "port.mfs=1518"
 
 # ------------------------------------------------------------ we see lldpd
 echo "-- lldpnd decodes lldpd"
@@ -163,6 +171,8 @@ check "capabilities incl. station enabled" grep -qE "^caps=.*station.* enabled=s
 check "management address IPv4"         w "mgmt=ipv4/192.0.2.2/if"
 check "management address IPv6"         w "mgmt=ipv6/2001:db8::2/if"
 check "802.3 org-specific TLVs accepted and counted" grep -qE "^org_tlvs=[1-9]" "$WORK/lldpnd_view.txt"
+check "802.3 MAC/PHY status decoded" grep -qE "^macphy=autoneg:" "$WORK/lldpnd_view.txt"
+check "802.3 link aggregation decoded" grep -qE "^lag=capable:" "$WORK/lldpnd_view.txt"
 check "no frames from lldpd rejected" bash -c "! grep -q 'rx: discard' '$WORK/lldpnd.log'"
 
 # ------------------------------------------------------------ live changes

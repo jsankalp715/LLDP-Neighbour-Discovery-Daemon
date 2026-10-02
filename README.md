@@ -5,11 +5,14 @@
 libpcap, no lldpd, no LLDP library. Everything received is treated as untrusted.
 
 * **Protocol.** It advertises Chassis ID, Port ID, TTL, Port Description, System
-  Name, System Description, System Capabilities and Management Address. It runs on
-  several interfaces at once with one chassis ID. Local changes (alias, addresses,
-  link state, hostname) are sent immediately, limited by the transmit credit. It also
-  implements fast start, a shutdown LLDPDU on exit, link up/down handling with
-  `reinitDelay`, interface hot-plug, and loop detection.
+  Name, System Description, System Capabilities, Management Address and the 802.3
+  Maximum Frame Size. It decodes the common 802.1/802.3 extensions neighbours send:
+  Port VLAN ID, VLAN Name, MAC/PHY, Link Aggregation and Maximum Frame Size. It runs
+  on several interfaces at once with one chassis ID, including VLAN sub-interfaces.
+  Local changes (alias, addresses, MTU, link state, hostname) are sent immediately,
+  limited by the transmit credit. It also implements fast start, a shutdown LLDPDU on
+  exit, link up/down handling with `reinitDelay`, interface hot-plug, loop detection,
+  adminStatus (rx/tx-only), and all three LLDP group addresses.
 * **Implementation.** C11, Linux only, `-Wall -Wextra -Werror` with GCC and Clang.
   One thread and one `epoll` loop: sockets, `timerfd`s, `signalfd`, rtnetlink and a
   hostname watch. An idle daemon wakes only to transmit.
@@ -43,6 +46,8 @@ sudo lldpnd-ctl -S /run/lldpnd/lldpnd.sock json | jq '.ports[].neighbors[].syste
 |---|---|---|
 | `-i IF[,IF…]` | interfaces to run on (repeatable, up to 32) | required |
 | `-c IF` | interface whose MAC is the chassis ID | first `-i` |
+| `-m MODE` | adminStatus: `rxtx`, `tx` (transmit only), `rx` (receive only) | `rxtx` |
+| `-a ADDR` | destination: `nearest-bridge`, `nearest-nontpmr`, `nearest-customer` | `nearest-bridge` |
 | `-t SECS` | msgTxInterval, 1–3600 | 30 |
 | `-H N` | msgTxHold, 1–100; TTL = min(65535, SECS×N+1) | 4 (TTL 121) |
 | `-f N` | txFastInit: frames sent 1 s apart at start, on link up and for a new neighbour, 0–8 | 4 |
@@ -116,7 +121,16 @@ real deadline, so an idle daemon doesn't wake every second. After start-up settl
     IPv6 forwarding is on.
   * Management Address: the first IPv4 address and the first IPv6 address (global
     preferred), numbered by ifIndex, or the MAC if the port has no IP.
+  * IEEE 802.3 Maximum Frame Size (8.6, 802.3 Clause 79): MTU + 18, following the
+    MTU live, so the peer can spot an MTU mismatch.
   * End.
+* **Destination** (7.1): `nearest-bridge` `01:80:C2:00:00:0E` (default; no bridge
+  forwards it), `nearest-nontpmr` `…03` (passes two-port MAC relays), or
+  `nearest-customer` `…00` (also passes provider bridges), chosen with `-a`. Frames
+  sent to another group address belong to another agent and are ignored. For
+  several agents on one port, run one `lldpnd` per address.
+* **adminStatus** (9.2.5.1, `-m`): `rxtx`, `tx` (received LLDPDUs are drained and
+  ignored), or `rx` (never transmits, not even a shutdown LLDPDU).
 * **Timing** (9.2.8, 9.2.10):
   * The first frame goes out at once, followed by a fast start of `txFastInit`
     frames 1 s apart, then one frame per `msgTxInterval`.
@@ -147,8 +161,15 @@ An LLDPDU is discarded, and counted in `statsFramesDiscardedTotal` /
 | a string is over 255 octets; Sys Cap ≠ 4; org-specific is under 4; a Management Address's internal lengths don't add up (8.5.9) | `optional TLV has invalid length` |
 
 * **Accepted and skipped.** Reserved TLV types (9..126) are counted as
-  `statsTLVsUnrecognizedTotal` and skipped. Valid org-specific TLVs are counted and
-  skipped. Octets after End Of LLDPDU are padding.
+  `statsTLVsUnrecognizedTotal` and skipped. Octets after End Of LLDPDU are padding.
+* **Organizationally specific TLVs** (8.6). These IEEE extensions are decoded,
+  stored, shown in `show` and `json`, and included in change detection:
+  * 802.1: Port VLAN ID; VLAN Name (the first is kept, the rest counted).
+  * 802.3: MAC/PHY Configuration/Status, Link Aggregation, Maximum Frame Size.
+
+  Each has a fixed or self-describing length. An unknown, malformed or repeated
+  extension is counted as unrecognized and ignored. Because these are optional
+  extensions defined outside 802.1AB, a bad one never discards the LLDPDU.
 * **Bounds and storage.** Only `lldp_tlv_next()` walks received TLVs, and it refuses
   any length past the buffer. Values are copied into fixed-size fields, so nothing
   is allocated per frame.
@@ -211,8 +232,10 @@ Comments cite IEEE Std 802.1AB-2016:
 
 ## Decisions and deviations
 
-* **Destination address.** Only the nearest-bridge address `01:80:C2:00:00:0E` is
-  used. The other two LLDP group addresses are neither joined nor accepted.
+* **One agent per process.** One agent per process means one destination address.
+  The standard's several agents per port (one per address) are run as one
+  `lldpnd` per address, each with its own control socket. The modes test verifies
+  this.
 * **Strictness.** Validation is stricter than the minimum: reserved ID subtypes,
   duplicate single-instance TLVs and inconsistent Management Address lengths are
   rejected.
@@ -227,24 +250,31 @@ Comments cite IEEE Std 802.1AB-2016:
   host. Bridge membership is not detected.
 * **Management Address.** At most one IPv4 and one IPv6 address are sent, with no
   OID. On receive the first 4 are stored, and all of them are validated.
-* **Not implemented.**
-  * The other two LLDP group addresses.
-  * Organisationally specific TLVs on transmit (802.1/802.3 extensions, LLDP-MED).
-  * The LLDP MIB/SNMP and notifications.
-  * VLAN-tagged LLDPDUs.
-  * Per-port timer settings.
-  * `adminStatus` values other than enabled (rx/tx-only modes).
+* **VLANs.** LLDPDUs are untagged, as 802.1AB specifies. On a VLAN, run `lldpnd`
+  on the VLAN sub-interface (`-i eth0.100`): its frames are tagged on the wire, and
+  the modes test verifies this.
+* **Out of scope, deliberately:**
+  * **The LLDP MIB over SNMP, and notifications.** This needs an SNMP agent
+    (AgentX). `lldpnd-ctl json` exposes the same information.
+  * **LLDP-MED** (ANSI/TIA-1057). It is a separate standard for VoIP endpoints.
+  * **Transmitting 802.3 MAC/PHY status.** Mapping a Linux link to an IANA MAU type
+    is ambiguous for virtual, bonded and multi-rate links, and a wrong value is
+    worse than none. MAC/PHY is decoded when received.
+  * **Transmitting 802.1 VLAN TLVs.** A host's port VLAN is not well defined; a
+    bridge's belongs to bridge software.
+  * **Per-port timers.** One process uses one set; run separate processes if needed.
 
 ## Testing
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | TLV header (exhaustive round trip), builders vs hand-computed bytes, **byte-for-byte frame**, every parser rule and boundary, neighbour keying/ageing/flush, tx scheduling on a simulated clock, netlink parsing incl. malformed buffers, mgmt-address selection, JSON validity and escaping | `tests/test_*.c` |
+| Unit | TLV header (exhaustive round trip), builders vs hand-computed bytes, **byte-for-byte frame**, every parser rule and boundary, 802.1/802.3 extension decoding incl. malformed and duplicate ones, neighbour keying/ageing/flush, tx scheduling on a simulated clock, netlink parsing incl. malformed buffers, mgmt-address selection, JSON validity and escaping | `tests/test_*.c` |
 | Memory | all unit tests under valgrind (leaks are errors) and ASan+UBSan (`-fno-sanitize-recover`) | `make valgrind`, `make asan` |
 | Fuzz | random, mutated and structure-aware frames → Ethernet parse → LLDPDU validation → table → text/JSON, plus the netlink parser; invariants: re-encode round trip, valid JSON | `make fuzz`, `make libfuzzer` |
-| Raw socket | veth pair in a private netns: byte-exact delivery, multicast membership, EtherType filter, truncation, outgoing detection | `make rawsock-test` |
+| Raw socket | veth pair in a private netns: byte-exact delivery, multicast membership for each group address, EtherType filter, truncation, outgoing detection | `make rawsock-test` |
 | Testbed | 3 namespaces on a Linux bridge, 10 phases, tshark-decoded capture | `make testbed` |
 | Interop | lldpnd ↔ **lldpd 1.0.18**, both directions | `make interop` |
+| Modes | adminStatus tx/rx-only, all three group addresses with two agents on one port, VLAN sub-interfaces, MFS following a live MTU change, extension decoding | `make modes-test` |
 | Service | the shipped systemd unit under real systemd | `scripts/service_check.sh` |
 | CI | all of the above on every push | `.github/workflows/ci.yml` |
 
@@ -289,31 +319,53 @@ run. Artifacts (`lldp.pcap`, `dissection.txt`, logs, JSON) go to `build/testbed/
 
 * **lldpd decodes lldpnd:** chassis MAC, system name and description, port ifname,
   alias-based port description, TTL, IPv4 and IPv6 management addresses, Router off
-  and Station on.
+  and Station on, and the 802.3 Maximum Frame Size (1518).
 * **lldpnd decodes lldpd:** chassis MAC, port ID as a MAC, name, capabilities,
-  IPv4 and IPv6 management addresses, and 802.3 org-specific TLVs. None of lldpd's
-  frames are rejected.
+  IPv4 and IPv6 management addresses, and lldpd's 802.3 MAC/PHY and Link
+  Aggregation TLVs. None of lldpd's frames are rejected.
+
+### Modes (`scripts/modes_test.sh`)
+
+The modes test runs on a veth pair between two namespaces, with a capture checked
+by tshark:
+* **adminStatus.**
+  * A transmit-only agent is learned by a receive-only one, but ignores a valid
+    injected LLDPDU itself.
+  * The receive-only agent sends nothing, not even a shutdown LLDPDU.
+  * The transmit-only agent's shutdown LLDPDU removes it from its neighbour.
+* **Group addresses.** Two agents share one port (`nearest-bridge` and
+  `nearest-customer`):
+  * Each pairs only with the peer agent on the same address and logs the other
+    address's frames as "wrong destination".
+  * The capture shows both destinations.
+* **VLAN.** Agents on `eth0.100` learn each other, and their frames carry VLAN tag
+  100 on the wire.
+* **Maximum Frame Size.** Setting MTU 9000 reaches the neighbour as MFS 9018
+  within about 30 ms.
+* **Extensions.** An injected frame's Port VLAN ID, VLAN Name, MAC/PHY, Link
+  Aggregation and MFS are decoded and appear in the JSON.
 * **Live changes:** an alias change reaches lldpd at once.
 * **Shutdowns:** each side's shutdown LLDPDU removes it from the other's table
   within 50 ms.
 
 ### Results
 
-Final run on 2026-10-03, from `make clean`, in WSL2:
+Final run on 2026-10-03, from `make clean`, in WSL2 (CI runs the same suites on GitHub's Ubuntu 24.04 runners):
 
 | Test | Result |
 |---|---|
 | Build, gcc 13.3 and clang 18, `-Werror` | clean |
-| Unit tests: 7 suites, gcc and clang | **609/609** |
-| Unit tests under valgrind (`--errors-for-leak-kinds=all`) | **609/609**, 0 errors, 0 leaks |
-| Unit tests under ASan+UBSan | **609/609** |
-| Fuzz driver under ASan+UBSan, 3M (default seed) + 10M (seed `0xdeadbeef`) | no crashes or sanitizer reports; round-trip and JSON-validity invariants held for every accepted frame |
-| libFuzzer + ASan+UBSan, 121 s | 22.5M executions (~186k/s), 383 edges, 523-input corpus, no crashes |
-| Raw-socket test, plain and ASan | **27/27** each |
+| Unit tests: 7 suites, gcc and clang | **652/652** |
+| Unit tests under valgrind (`--errors-for-leak-kinds=all`) | **652/652**, 0 errors, 0 leaks |
+| Unit tests under ASan+UBSan | **652/652** |
+| Fuzz driver under ASan+UBSan, 3M (default seed) + 10M (seed `0xdeadbeef`) | no crashes or sanitizer reports; round-trip (including extensions) and JSON-validity invariants held for every accepted frame |
+| libFuzzer + ASan+UBSan, 120 s | 12.7M executions (~105k/s), 403 edges, 505-input corpus, no crashes |
+| Raw-socket test, plain and ASan | **36/36** each |
 | Testbed, plain | **77/77** |
 | Testbed, daemons under ASan+UBSan | **77/77**, no sanitizer output |
 | Testbed, daemons under valgrind | **77/77**, no valgrind output |
-| Interop with lldpd 1.0.18 | **29/29** |
+| Interop with lldpd 1.0.18 | **32/32** |
+| Modes: adminStatus, group addresses, VLAN, MFS, extensions | **26/26** |
 | systemd unit under real systemd | **14/14**; `systemd-analyze security` exposure 1.9 (OK) |
 | Idle steady state, `-t 5`, 20 s | 4 wake-ups (one per frame), 0 ms CPU, in `do_epoll_wait` |
 | CLI and control-socket edge cases (bad ranges, unknown interface or user, `-U root`, live or stale or regular file at the socket path) | 19/19 correct exit codes; never replaces a live socket or a regular file |
@@ -349,6 +401,16 @@ Final run on 2026-10-03, from `make clean`, in WSL2:
      advertised router, but the tests assumed station. The tests now pin forwarding
      off per namespace, and a new check confirms that turning it on switches the
      advertised capability to router.
+   * Also found by CI: LeakSanitizer's exit-time leak check failed ("does not work
+     under ptrace") for the ASan daemon that drops privileges. The check must ptrace
+     the process, which is non-dumpable after `setuid`, and the runner refused the
+     attach. Making the daemon dumpable again would let any process running as the
+     target user ptrace a process holding `CAP_NET_RAW`, so the daemon is unchanged.
+     That one ASan daemon runs with `detect_leaks=0`, and CI now also runs the
+     valgrind testbed, which checks leaks in-process on every daemon, including
+     that one.
+   * In the modes test, an injected frame was sent from the receiving agent's own
+     namespace, so it left the interface rather than arriving at it.
 5. **Wireshark 4.2.2 display quirk, not a defect.** On LLDP frames longer than 60
    octets, Wireshark shows the last 3 octets as an Ethernet "trailer". Frames built
    independently in Python show the same thing, and every TLV still decodes with no
@@ -366,5 +428,4 @@ wsl -d Ubuntu-24.04 -u root --cd /mnt/d/lldp -- make check
 
 ## License
 
-No license has been chosen yet. Until one is added, the default copyright rules
-apply.
+MIT; see [LICENSE](LICENSE).
