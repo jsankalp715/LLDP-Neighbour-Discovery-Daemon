@@ -75,6 +75,9 @@ jobs:
         run: sudo make modes-test
       - name: systemd unit under real systemd
         run: sudo bash scripts/service_check.sh
+      - name: Make artifacts readable (the tests ran as root)
+        if: always()
+        run: sudo chmod -R a+rX build || true
       - name: Upload captures and logs
         if: always()
         uses: actions/upload-artifact@v7

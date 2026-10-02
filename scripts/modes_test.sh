@@ -94,6 +94,7 @@ trap cleanup EXIT
 cleanup
 rm -rf "$OUT"; mkdir -p "$OUT"
 WORK=$(mktemp -d /tmp/lldp-modes.XXXXXX)
+chmod 755 "$WORK"    # artifacts must stay readable once copied to $OUT
 
 ip netns add $A; ip netns add $B
 ip -n $A link add eth0 address $MAC_A type veth peer name eth0 netns $B address $MAC_B
